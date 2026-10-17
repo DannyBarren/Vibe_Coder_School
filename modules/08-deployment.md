@@ -279,6 +279,222 @@ Something is broken in production. Customers are affected. Here's what to do, in
 - Don't delete logs or evidence.
 - Don't hide it from affected users, especially if their data was involved; depending on where you and they are, you may have legal notification obligations.
 
+### 11. A sample pipeline: lint, test, build, preview, migrate, promote
+
+Here's the CI/CD flow from section 4 as a real GitHub Actions workflow for a Next.js + Prisma app deployed to Vercel. It uses Vercel's documented CLI pattern (`vercel pull` → `vercel build` → `vercel deploy --prebuilt`; see [Vercel's guide](https://vercel.com/kb/guide/how-can-i-use-github-actions-with-vercel)), and it passes `actionlint`. Swap the deploy steps for your platform's CLI if you're elsewhere; the shape stays the same.
+
+```yaml
+# .github/workflows/ci-cd.yml
+name: ci-cd
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Don't run two deploys of the same branch at once; newer pushes cancel older runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres   # throwaway CI database
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npx prisma migrate deploy   # proves migrations apply cleanly to an empty DB
+      - run: npm test
+      - run: npm run build
+
+  preview:
+    if: github.event_name == 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: preview
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --global vercel@latest
+      - run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+      - run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+      - name: Deploy preview
+        id: deploy
+        run: echo "url=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})" >> "$GITHUB_OUTPUT"
+      - run: echo "Preview ready at ${{ steps.deploy.outputs.url }}"
+
+  production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production   # add required reviewers in GitHub settings = a manual "promote" button
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Migrate production database (backward-compatible migrations only)
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.PROD_MIGRATION_DATABASE_URL }}
+      - run: npm install --global vercel@latest
+      - run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+      - run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+      - run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+      - name: Smoke test
+        run: |
+          curl --fail --silent --show-error --retry 5 --retry-delay 5 --retry-all-errors https://yourapp.example/api/health
+          curl --fail --silent --show-error --output /dev/null https://yourapp.example/login
+```
+
+What each part buys you:
+
+- **`test` runs on every PR and every push to main.** Lint, typecheck, migrations against a throwaway database, tests, build. If any step fails, nothing deploys.
+- **`preview` deploys every PR** to its own URL with preview-environment variables (test-mode keys, non-production database). You review the running app *and* the diff before merging.
+- **`production` only runs on main, after tests pass**, and uses a GitHub *environment* called `production`. In the repo settings you can require a reviewer for that environment, which turns the job into a "promote to production" button: the pipeline waits until you approve. Environment-scoped secrets (`PROD_MIGRATION_DATABASE_URL`) are only available to that job.
+- **Migrations run before the new code goes live**, which is why they must be backward-compatible (section 7).
+- **Smoke tests** confirm the health endpoint and login page respond after deploy. If they fail, you roll back (section 14).
+- **`concurrency`** stops two deploys of the same branch from racing each other.
+
+Setup notes:
+
+- Add `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and `PROD_MIGRATION_DATABASE_URL` as GitHub secrets (the last one as an *environment* secret on `production`). Never paste them into the YAML.
+- If Vercel's built-in Git integration is also connected, every push deploys twice. Pick one: either disable Git-triggered deploys or drop the deploy jobs here.
+- Pull requests from forks don't get your secrets (by design), so preview deploys only work for branches in your own repo.
+- If preview URLs are protected (they should be; section 5), smoke-testing them needs your platform's protection-bypass mechanism. Otherwise just click through the preview yourself.
+- Use a dedicated database user for migrations with only the permissions migrations need, separate from the app's runtime user.
+
+### 12. Environment variable matrix (template)
+
+Keep this table in your repo (`docs/environments.md`) and update it whenever you add a variable. It answers "what does each environment use?" at a glance, and it's how you catch "wait, preview is using the live Stripe key."
+
+| Variable | Secret? | Exposed to browser? | Local | Preview | Staging | Production | Owner / rotation |
+|---|---|---|---|---|---|---|---|
+| `DATABASE_URL` | Yes | No | local Docker DB | preview/branch DB | staging DB | prod DB (app user) | you, on staff change |
+| `PROD_MIGRATION_DATABASE_URL` | Yes | No | n/a | n/a | n/a | prod DB (migration user, CI only) | you |
+| `STRIPE_SECRET_KEY` | Yes | No | `sk_test_…` | `sk_test_…` | `sk_test_…` | `sk_live_…` (prod only) | yearly or on leak |
+| `STRIPE_WEBHOOK_SECRET` | Yes | No | CLI-generated | test endpoint | test endpoint | live endpoint | on endpoint change |
+| `OPENAI_API_KEY` | Yes | No | dev key, low cap | dev key, low cap | staging key | prod key, own cap | on leak |
+| `SENTRY_DSN` | No* | Yes (frontend) | dev project or empty | staging project | staging project | prod project | n/a |
+| `NEXT_PUBLIC_APP_URL` | No | Yes | `http://localhost:3000` | preview URL | staging URL | `https://yourapp.example` | n/a |
+| `LOG_LEVEL` | No | No | `debug` | `info` | `info` | `info` | n/a |
+
+\* Frontend error-tracker keys are designed to be public; scope them to their project and enable allowed-origin filtering where offered.
+
+How to use it:
+
+- Any row where Production shares a value with another column is a finding.
+- Anything marked "Exposed to browser" must not be a secret. Check the framework prefix (`NEXT_PUBLIC_`, `VITE_`, `PUBLIC_`).
+- The "Owner / rotation" column is what you'll want during an incident ([Module 2](02-security-vulnerabilities.md) covers rotation).
+
+### 13. The cost-guardrail checklist
+
+Run this before launch, and again whenever you add a paid service:
+
+**Every provider (hosting, database, LLM, email/SMS, storage, maps, cloud):**
+
+- [ ] Billing alert at roughly 50%, 80%, and 100% of expected monthly spend, going to a channel you read.
+- [ ] Hard spending cap or usage limit set, where the provider offers one. Know what happens when it's hit (service stops vs. overage charges).
+- [ ] Payment method has a sensible limit, or a virtual card with a cap, for side projects.
+- [ ] You know where the usage dashboard is and have looked at it once since launch.
+
+**API keys:**
+
+- [ ] Separate keys per environment and per app. Never one key for everything.
+- [ ] Per-key limits or budgets where the provider supports them.
+- [ ] Keys scoped to the minimum permissions needed.
+- [ ] No paid-API key in browser code. Calls go through your server.
+
+**Your code:**
+
+- [ ] Every endpoint that triggers a paid call requires authentication.
+- [ ] Per-user rate limits and daily quotas on paid features, tied to their plan.
+- [ ] Retries are bounded with backoff; outbound calls have timeouts.
+- [ ] No recursive triggers (function → storage → same function).
+- [ ] LLM calls set `max_tokens` (or equivalent) and cap input size.
+- [ ] Caching for repeated, identical expensive calls where it's safe.
+- [ ] Usage per user is logged, so you can spot one account burning 90% of the budget.
+
+**Platform:**
+
+- [ ] Serverless concurrency or instance limits set where supported.
+- [ ] Bot protection or firewall rules on public endpoints that are being abused.
+- [ ] Large files served via CDN/object storage, not through your functions.
+
+### 14. The rollback drill
+
+Rolling back under pressure, for the first time, while customers are emailing you, is a bad way to learn your platform's UI. Practice once a quarter. It takes 20 minutes.
+
+1. **Pick a quiet time** and tell anyone who needs to know.
+2. **Note the current production version** (deployment ID or git SHA). Most platforms show it; your `/api/health` should too ([Module 6](06-observability.md)).
+3. **Ship a harmless, visible change** through the normal pipeline, e.g. a footer text "Drill 2026-10-17."
+4. **Start a timer, then roll back** using your platform's rollback feature (on Vercel, "Instant Rollback" in the dashboard or `vercel rollback`; on other platforms, "redeploy previous release" or equivalent).
+5. **Verify**: the footer text is gone, the health endpoint reports the old SHA, the error tracker shows no new issues. Stop the timer.
+6. **Roll forward** (redeploy the latest version), or revert the drill commit and let the pipeline deploy.
+7. **Write it down**: the exact clicks or commands, who has permission, how long it took, and anything that surprised you. Put it in the incident playbook (section 10).
+
+Bonus round: do the drill with a **migration** involved, on staging. Deploy a change with an additive migration, roll back the code, and confirm the old code still works with the new schema. If it doesn't, your migrations aren't backward-compatible yet ([Module 7](07-data-modeling.md)).
+
+Remember: some platforms stop auto-promoting new deployments after a rollback. Vercel, for example, turns off automatic assignment of production domains after an Instant Rollback, so new pushes won't go live until you promote a deployment again (`vercel promote`; see [Vercel's rollback docs](https://vercel.com/docs/instant-rollback)). Know how yours behaves, or you'll spend the next morning wondering why your fix isn't live.
+
+### 15. Launch-day runbook
+
+Launching (on Product Hunt, Hacker News, to a mailing list, or to a paying client) is a planned traffic spike with an audience watching. Treat it like one.
+
+**One week before**
+
+- [ ] Pre-launch production checklist (below) fully checked.
+- [ ] Load-relevant limits reviewed: database connection limits and plan, serverless concurrency, email sending limits, LLM rate limits and tier.
+- [ ] Rate limits on signup, login, and paid features tested.
+- [ ] Billing alerts and caps set (section 13).
+- [ ] Backup restore tested ([Module 7](07-data-modeling.md)); rollback drill done (section 14).
+- [ ] Error tracker, uptime monitor, and alerts verified by triggering each one ([Module 6](06-observability.md)).
+- [ ] A status page or a pinned post where you'll communicate if something breaks.
+
+**The day before**
+
+- [ ] **Code freeze.** No new features. Only fixes, through the pipeline. (Enforced by you, not by asking an agent nicely.)
+- [ ] Full run-through on production: sign up as a new user, do the core action, pay with a real card and refund it, receive every email.
+- [ ] Incident playbook open in a tab; secrets-rotation steps and rollback steps at hand.
+- [ ] Decide what you'll turn off if load is too high (feature flags for expensive features, signups waitlist).
+
+**Launch hour**
+
+- [ ] Watch, don't build: error tracker, logs, platform metrics, database connections, billing/usage dashboards.
+- [ ] Do the full user journey yourself once traffic arrives.
+- [ ] Any new error type gets triaged immediately: ignore, fix-forward through the pipeline, flag off, or roll back.
+
+**First 24-48 hours**
+
+- [ ] Check spend against expectations every few hours.
+- [ ] Reply to user-reported bugs quickly, even if just "we're on it."
+- [ ] Keep a list of everything that went wrong or almost did. Turn it into tests, alerts, and runbook updates next week.
+- [ ] Only then lift the code freeze.
+
 ---
 
 ## What Good Looks Like

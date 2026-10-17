@@ -310,6 +310,279 @@ Floating-point numbers can't represent most decimals exactly. For money:
 - Dates without times (birthdays, due dates) are different from instants. A `date` column for "due on March 3" avoids the classic "it's due on March 2 for everyone west of London" bug.
 - Daylight saving transitions produce days with 23 or 25 hours and local times that don't exist or happen twice. Test around them ([Module 4](04-testing.md)'s edge-case menu).
 
+### 11. Worked example: from a JSON blob to real tables
+
+*(Illustrative, and extremely common.)* Version 1 of a project tracker, as the AI first built it: each project stores its tasks inside a JSON column.
+
+```sql
+-- v1: "just put it in JSON"
+CREATE TABLE projects (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id    uuid NOT NULL,
+  name        text NOT NULL,
+  data        jsonb NOT NULL DEFAULT '{}'::jsonb,  -- {"tasks":[{"title","done","due"}], "color": ...}
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+```
+
+It worked for months. Then came the requests: "show all overdue tasks across my projects," "let two people edit tasks at once without overwriting each other," "assign tasks to teammates." Every one of those is painful in a JSON blob: no constraints, no indexes on individual tasks, and every edit rewrites the whole array (so two simultaneous edits means one silently wins).
+
+Time to evolve the schema, using expand/contract so the live app never breaks.
+
+**Step 0: Pre-flight.** Before migrating, find the data your migration can't handle. Real JSON blobs written by months of AI-generated code are never as clean as you think:
+
+```sql
+-- Pre-flight: find data the backfill can't convert (run BEFORE migrating)
+SELECT p.id, p.name, t.value->>'due' AS bad_due
+FROM projects p
+CROSS JOIN LATERAL jsonb_array_elements(
+  CASE WHEN jsonb_typeof(p.data->'tasks') = 'array' THEN p.data->'tasks' ELSE '[]'::jsonb END
+) AS t(value)
+WHERE t.value->>'due' IS NOT NULL
+  AND t.value->>'due' !~ '^\d{4}-\d{2}-\d{2}$';
+
+-- Projects whose "tasks" exists but isn't an array at all
+SELECT id, name, jsonb_typeof(data->'tasks') AS tasks_type
+FROM projects
+WHERE data ? 'tasks' AND jsonb_typeof(data->'tasks') <> 'array';
+```
+
+On a realistic dataset this finds things like `"due": "next friday"` and a project where `tasks` is an object instead of an array. Decide what to do with each (here: unparseable dates become NULL, the odd project gets fixed by hand) *before* you migrate, not halfway through.
+
+**Step 1: Expand.** Add the new table. Purely additive, so the running code doesn't notice:
+
+```sql
+-- 0007_create_tasks.sql  (expand: purely additive, safe while old code runs)
+CREATE TABLE tasks (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id  uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title       text NOT NULL CHECK (length(title) BETWEEN 1 AND 500),
+  done        boolean NOT NULL DEFAULT false,
+  due_date    date,
+  position    integer NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_tasks_project_position ON tasks (project_id, position);
+```
+
+**Step 2: Backfill**, in a transaction, with a verification that rolls everything back if the numbers don't match:
+
+```sql
+-- 0008_backfill_tasks.sql  (copy JSON tasks into the new table, all-or-nothing)
+BEGIN;
+
+INSERT INTO tasks (project_id, title, done, due_date, position)
+SELECT
+  p.id,
+  COALESCE(NULLIF(trim(t.value->>'title'), ''), '(untitled)'),
+  COALESCE((t.value->>'done')::boolean, false),
+  CASE WHEN t.value->>'due' ~ '^\d{4}-\d{2}-\d{2}$'
+       THEN (t.value->>'due')::date END,          -- unparseable dates become NULL (found in pre-flight)
+  t.position::int
+FROM projects p
+CROSS JOIN LATERAL jsonb_array_elements(
+  CASE WHEN jsonb_typeof(p.data->'tasks') = 'array' THEN p.data->'tasks' ELSE '[]'::jsonb END
+) WITH ORDINALITY AS t(value, position);
+
+-- Verify inside the transaction: counts must match, or we roll back
+DO $$
+DECLARE in_json bigint; in_table bigint;
+BEGIN
+  SELECT COALESCE(sum(jsonb_array_length(data->'tasks')), 0) INTO in_json
+  FROM projects WHERE jsonb_typeof(data->'tasks') = 'array';
+  SELECT count(*) INTO in_table FROM tasks;
+  IF in_json <> in_table THEN
+    RAISE EXCEPTION 'Backfill mismatch: % tasks in JSON, % in table', in_json, in_table;
+  END IF;
+END $$;
+
+COMMIT;
+```
+
+A nice side effect of the built-in check: if someone (or some agent) accidentally runs the backfill twice, the counts no longer match, the transaction raises an error, and nothing is inserted. The guard rail is part of the migration itself. (The date regex only checks the *shape* `YYYY-MM-DD`; an impossible date like `2026-13-45` would still fail the cast, which is exactly what the pre-flight step is for.)
+
+**Step 3: Dual-write, then switch reads.** Deploy code that writes tasks to *both* places, so nothing created during the transition is lost. If new tasks were created between the backfill and this deploy, re-sync them (or do the backfill right after the dual-write deploy). Then deploy code that reads from the `tasks` table. Watch errors and compare a few projects by hand.
+
+**Step 4: Stop writing JSON tasks.** Once reads have been on the new table for a while without problems, remove the JSON write path.
+
+**Step 5: Contract.** Only now remove the old data, and only what you actually migrated:
+
+```sql
+-- 0009_drop_json_tasks.sql  (contract: only after the new code has been live and verified)
+-- Only remove arrays we actually migrated; anything odd stays for a human to look at.
+UPDATE projects SET data = data - 'tasks'
+WHERE jsonb_typeof(data->'tasks') = 'array';
+```
+
+Note the `WHERE`: an earlier draft of this step removed `tasks` from *every* project, which would have silently destroyed the odd non-array data the pre-flight found. "Delete everything that matches a key" is the kind of line an AI writes without blinking. Read it twice. Take a backup first.
+
+Five steps instead of one "migrate everything" prompt. Each step is reversible until the last, and the app works throughout.
+
+### 12. ORM vs. raw SQL
+
+AI tools will pick an ORM (Prisma, Drizzle, TypeORM, SQLAlchemy, Django ORM, ActiveRecord) or raw SQL more or less at random. Both are fine. Mixing four approaches in one codebase is not.
+
+| | ORM / query builder | Raw SQL |
+|---|---|---|
+| **Good at** | Type-safe CRUD, migrations tooling, relationships, less boilerplate | Complex reports, bulk operations, window functions, performance tuning |
+| **Watch out for** | N+1 queries hidden behind innocent-looking property access; generated migrations that drop and recreate columns; "magic" you don't understand | String concatenation (SQL injection; see [Module 2](02-security-vulnerabilities.md)); no type safety unless you add it; hand-mapping rows |
+| **AI pitfalls** | Hallucinated ORM methods and options that don't exist in your version | Mixing dialects (MySQL syntax in Postgres), forgetting parameters |
+
+A sensible default for most small apps:
+
+- Use **one** ORM or query builder for everyday reads and writes, and its migration tool for schema changes.
+- Drop to **parameterized** raw SQL for the handful of queries where it's clearer or faster: reports, backfills, bulk updates. Keep them in the data layer ([Module 5](05-architecture.md)), not sprinkled in route handlers.
+- Learn enough SQL to read what your ORM generates. Most ORMs can log their queries; turn that on in development once in a while and look. That's how you spot the N+1 that makes your dashboard take six seconds.
+
+```ts
+// BAD: string-built SQL (injection risk, and breaks on names like O'Brien)
+await db.query(`SELECT * FROM customers WHERE email = '${email}'`);
+
+// GOOD: parameterized (the driver handles escaping)
+await db.query("SELECT id, name FROM customers WHERE email = $1", [email]);
+```
+
+### 13. Seeding and test data
+
+**Seed data** is the known, fake data you load into local, preview, and test databases so the app has something to show and your tests have something to work with.
+
+```sql
+-- seed.sql — local/dev/test only. Idempotent: running it twice changes nothing.
+INSERT INTO customers (email, name) VALUES
+  ('alice@example.com', 'Alice Example'),
+  ('bob@example.com',   'Bob Example')
+ON CONFLICT (email) DO NOTHING;
+
+-- Fixed IDs make seed rows easy to reference in tests and safe to re-insert
+INSERT INTO products (id, name, price_cents, active) VALUES
+  ('00000000-0000-0000-0000-000000000101', 'Starter Kit',      1999, true),
+  ('00000000-0000-0000-0000-000000000102', 'Family Kit',       4999, true),
+  ('00000000-0000-0000-0000-000000000103', 'Discontinued Kit',  999, false)  -- edge case on purpose
+ON CONFLICT (id) DO NOTHING;
+```
+
+Seed rules:
+
+- **Idempotent.** Running the seed twice must not create duplicates (`ON CONFLICT DO NOTHING`, fixed IDs for reference data).
+- **Include edge cases on purpose:** an inactive product, an expired coupon, a user with no orders, a name with an apostrophe, a long name with emoji. Seeds are the cheapest edge-case tests you'll ever write.
+- **Never** seed production with fake users, and never run a seed script with a production connection string. Put a guard at the top of seed scripts that refuses to run if the environment is production.
+- **No real customer data in seeds or test databases.** If you need realistic volume, generate it (libraries like Faker exist for most languages) or use properly anonymized data.
+- Reference data that production genuinely needs (plans, countries, permission roles) belongs in **migrations**, not seeds, so every environment gets it the same way.
+
+### 14. A backup restore drill you can actually run
+
+Section 8 said "a backup you haven't restored is a rumor." Here's a script that turns the rumor into evidence. It dumps a database, restores it into a separate scratch database, compares row counts, and times the whole thing. Tested against Postgres 17:
+
+```bash
+#!/usr/bin/env bash
+# restore-drill.sh — dump a database, restore it into a NEW scratch database, and check it.
+set -euo pipefail
+
+: "${SOURCE_URL:?Set SOURCE_URL to a READ-ONLY connection string for the database to back up}"
+: "${DRILL_URL:?Set DRILL_URL to an EMPTY scratch database (never production)}"
+TABLES="${TABLES:-customers orders order_items}"   # tables to compare
+NEWEST_TABLE="${NEWEST_TABLE:-orders}"             # table with a created_at column
+
+if [[ "$DRILL_URL" == "$SOURCE_URL" ]]; then
+  echo "Refusing: DRILL_URL is the same as SOURCE_URL." >&2
+  exit 1
+fi
+
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+FILE="backup-$STAMP.dump"
+start=$(date +%s)
+
+echo "1/4 Dumping source..."
+pg_dump --format=custom --no-owner --no-privileges --file="$FILE" "$SOURCE_URL"
+
+echo "2/4 Restoring into the drill database..."
+pg_restore --no-owner --no-privileges --exit-on-error --dbname="$DRILL_URL" "$FILE"
+
+echo "3/4 Comparing row counts (a busy database may drift slightly; big gaps are a problem)..."
+fail=0
+for table in $TABLES; do
+  src=$(psql "$SOURCE_URL" -tAc "SELECT count(*) FROM $table")
+  dst=$(psql "$DRILL_URL" -tAc "SELECT count(*) FROM $table")
+  printf '  %-14s source=%-8s restored=%s\n' "$table" "$src" "$dst"
+  [[ "$src" == "$dst" ]] || fail=1
+done
+
+echo "4/4 Newest record in the restored copy:"
+psql "$DRILL_URL" -tAc "SELECT max(created_at) FROM $NEWEST_TABLE"
+
+echo "Drill took $(( $(date +%s) - start ))s. Backup file: $FILE ($(du -h "$FILE" | cut -f1))"
+[[ $fail -eq 0 ]] && echo "PASS" || echo "FAIL: row counts differ"
+exit $fail
+```
+
+Usage:
+
+```bash
+SOURCE_URL="postgres://readonly_user:...@host/app" \
+DRILL_URL="postgres://user:...@localhost/restore_drill" \
+TABLES="customers orders order_items" NEWEST_TABLE=orders \
+./restore-drill.sh
+```
+
+Important details:
+
+- Use a **read-only** user for `SOURCE_URL`, and run the script yourself, not via an AI agent ([Module 8](08-deployment.md)).
+- `DRILL_URL` must be an **empty scratch database**. The script refuses to restore into the source, but it can't know whether some other URL is production. Double-check.
+- Your `pg_dump` version must be the **same or newer** than the server's major version. A version mismatch is exactly what silently broke GitLab's backups in 2017 (section 8).
+- The dump file contains all your data, including personal data. Store and delete it accordingly.
+- This tests *your own* dump. Also practice your provider's restore (snapshots or point-in-time recovery) at least once, because that's what you'll use in a real emergency. Then point a staging copy of the app at the restored database and click around.
+- Run it on a schedule (monthly or quarterly), and write down the time it took. That's your real-world recovery time.
+
+### 15. Multi-tenant data: keeping customers' data apart
+
+If your app has **organizations, teams, or workspaces** (B2B SaaS, agencies, anything where several users share data), you're building a **multi-tenant** app. The most common approach for small and mid-size apps is shared tables with a `tenant_id` (often called `org_id` or `workspace_id`) on every tenant-owned row.
+
+```sql
+CREATE TABLE organizations (
+  id    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name  text NOT NULL
+);
+
+CREATE TABLE memberships (
+  org_id   uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  user_id  uuid NOT NULL,
+  role     text NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+  PRIMARY KEY (org_id, user_id)
+);
+
+CREATE TABLE org_projects (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id      uuid NOT NULL REFERENCES organizations(id),
+  slug        text NOT NULL,
+  name        text NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (org_id, slug),   -- slugs are unique per organization, not globally
+  UNIQUE (org_id, id)      -- lets child tables reference (org_id, id) together
+);
+CREATE INDEX idx_org_projects_org_created ON org_projects (org_id, created_at DESC);
+
+CREATE TABLE org_tasks (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id      uuid NOT NULL,
+  project_id  uuid NOT NULL,
+  title       text NOT NULL,
+  -- A task can only point at a project in the SAME organization:
+  FOREIGN KEY (org_id, project_id) REFERENCES org_projects (org_id, id) ON DELETE CASCADE
+);
+CREATE INDEX idx_org_tasks_org_project ON org_tasks (org_id, project_id);
+```
+
+The rules that make it work:
+
+- **Every tenant-owned table gets `org_id NOT NULL`.** Even child tables like tasks, so every query can filter by tenant directly.
+- **Uniqueness is per tenant:** `UNIQUE (org_id, slug)`, not `UNIQUE (slug)`. Two companies can both have a project called "launch."
+- **Composite foreign keys** (`(org_id, project_id) REFERENCES org_projects (org_id, id)`) make it *impossible* for a task in one organization to point at another organization's project. Tested: the database rejects the cross-tenant insert outright.
+- **Index by tenant first:** `(org_id, created_at)`, `(org_id, project_id)`. Nearly every query filters by tenant.
+- **Every query is scoped by tenant**, enforced in one place: a repository layer that requires `orgId` as an argument, and ideally database-level Row Level Security as a backstop. How to set up and test RLS properly is covered in [Module 2](02-security-vulnerabilities.md); the four-case auth tests from [Module 4](04-testing.md) apply per tenant too.
+- **The tenant comes from the session**, via a membership check, never from a request parameter the user can change.
+
+Other models exist (a separate schema or a separate database per tenant). They give stronger isolation and are sometimes required by enterprise customers or regulation, at the cost of much more operational work. If someone asks for them, that's a good moment for an ADR ([Module 5](05-architecture.md)) and possibly an experienced engineer ([Module 9](09-tech-debt.md)).
+
 ---
 
 ## What Good Looks Like

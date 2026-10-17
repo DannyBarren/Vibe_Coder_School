@@ -173,6 +173,26 @@ Why rewrites are riskier than they look:
 
 **If you rewrite, rewrite like an engineer:** write down requirements first (mine the old code and bug history for them), write tests from those requirements, design the data model and migration path from the old data, set up the architecture rules file ([Module 5](05-architecture.md)) before the first prompt, and migrate gradually (strangler pattern) rather than with a big-bang switchover.
 
+#### A rewrite-vs-refactor decision table
+
+When the "just start over" urge hits, score your situation honestly. Each row leans one way:
+
+| Question | Leans **refactor** | Leans **rewrite** |
+|---|---|---|
+| Do real users depend on it today? | Yes, many, or paying | Few or none (still a prototype) |
+| Is the data model roughly right? | Yes, mostly | No: the core entities or relationships are wrong |
+| Where are the problems? | Concentrated in a few areas | Everywhere, including the foundations |
+| Can you write tests around current behavior? | Yes | No: behavior is unknowable or random |
+| Is the security architecture fixable in place? | Yes (missing checks can be added) | No (e.g., all authorization in the client against an exposed database) |
+| Do you understand what it's supposed to do? | Yes, and it's documented or testable | No, and the old code is the only spec, but it's wrong |
+| Is the platform/stack fundamentally unsuited? | No, just messy | Yes: you've hit hard limits of the platform |
+| Can you migrate gradually (strangler)? | n/a | Yes, which makes a rewrite much safer |
+| Can you afford months of maintaining two systems? | n/a | Only rewrite if yes |
+
+**How to read it:** if most answers land in the refactor column, refactor, even if it feels slower. If most land in the rewrite column, a rewrite may be justified, but write down the requirements and the data migration plan first, and estimate both paths. If it's mixed, refactor the worst area first and re-score in a month; you'll often find the "rewrite" urge was really a few terrible files.
+
+One honest test: *"If I rewrote this with AI next week, using the same habits, would the result be better?"* If the answer is "only if I change how I work," then change how you work first. That fixes the existing code too.
+
 ### 5. When to bring in a real engineer
 
 Using AI doesn't mean you have to do everything alone. Knowing when to get help is a professional skill, not a failure. Here are the moments when an experienced engineer is worth the money:
@@ -202,7 +222,260 @@ Using AI doesn't mean you have to do everything alone. Knowing when to get help 
 - Pay for a **security review or penetration test** before launch if you handle sensitive data ([Module 2](02-security-vulnerabilities.md)).
 - **Learn while they work.** Ask them to explain decisions. Pair on the fixes. Your goal is to need them less next time.
 
-### 6. Graduation: from vibe coder to AI-assisted engineer
+#### What to bring a hired engineer: the handoff doc
+
+Engineers bill by the hour, and the first hours on an unfamiliar AI-built codebase are mostly archaeology. A two-page handoff doc can save a day or more of that. Put it in `docs/HANDOFF.md`:
+
+```markdown
+# Handoff: [App name]
+
+## What it is (3 sentences)
+What the app does, who uses it, and what matters most (e.g., "Small businesses
+send invoices and get paid by card. ~300 active accounts, ~$8k/month processed.").
+
+## Why I'm bringing you in
+The specific problem or goal: "security review before our first enterprise
+customer", "checkout keeps breaking", "plan a migration off X".
+What success looks like at the end of the engagement.
+
+## Stack and hosting
+Framework, language, database, auth provider, payments, AI APIs, email, hosting.
+Links to dashboards (access granted separately, least privilege).
+
+## How to run it
+Clone → install → copy .env.example → seed → run → test. Exact commands.
+Known setup gotchas.
+
+## Architecture
+Layers and folders (or link to AGENTS.md / docs/decisions/).
+Diagram or list of the main request flows (login, core action, payments, webhooks).
+
+## Data
+Main tables and relationships (or link to schema). Multi-tenancy approach.
+Where personal / sensitive data lives. Backup setup and last tested restore date.
+
+## Auth and permissions
+How login works. Where authorization is enforced (server? RLS?).
+What I'm unsure about.
+
+## Environments and deploys
+Which environments exist, how deploys happen (CI/CD link), how to roll back.
+Who has production access.
+
+## Known issues and debt
+Link to DEBT.md. Top 5 problems in my own words. Recent incidents.
+
+## Things I'm least confident about
+The honest list. This is where your money is best spent.
+
+## Constraints
+Budget, deadlines, things that must not change (e.g., URLs, a customer's integration).
+```
+
+Also give them: a repo invite with the right permissions, read-only or staging access before production access, test accounts, and 30 minutes on a call where you click through the app. **Never** send production secrets over chat or email; use your platform's team access or a password manager's sharing feature.
+
+### 6. The debt register: making debt visible
+
+Debt you can't see, you can't prioritize. A **debt register** is a simple file (`DEBT.md`) or an issue label where every known shortcut gets written down. It turns "the codebase feels bad" into a list you can actually work through.
+
+```markdown
+# Debt register
+
+Last reviewed: 2026-10-17
+
+| ID | What | Where | Interest (why it hurts) | Risk | Effort | Fix idea | Status |
+|----|------|-------|-------------------------|------|--------|----------|--------|
+| D1 | Plan check done in browser | components/Export.tsx | Free users can export | **Security / High** | S | Move hasProFeatures() server-side, add auth test | Open |
+| D2 | 3 date helpers disagree | lib/, emails/, components/ | Streak bugs keep coming back | High | M | Consolidate into lib/dates.ts (see section 8) | In progress |
+| D3 | No tests on pricing | lib/pricing.ts | Every change is scary | High | M | Characterization tests, then requirement tests | Open |
+| D4 | Dashboard.tsx is 2,900 lines | components/ | AI edits break unrelated features | Medium | L | Extract per Module 5 plan, one step per commit | Open |
+| D5 | Hard-coded staff discount email | services/orders.ts | Surprise $0 orders | Medium | S | Move to a role/flag in the DB | Open |
+| D6 | Unused Stripe v1 webhook route | app/api/stripe-old/ | Confuses AI sessions, attack surface | Low | S | Delete | Open |
+
+## Done
+- 2026-10-10 — D0: swallowed errors in signup (fixed, regression test added)
+```
+
+How to keep it useful:
+
+- **Add an entry the moment you take a shortcut**, deliberately or not. "I'll remember" is how accidental debt is born.
+- **Security items go to the top and get fixed first**, always.
+- **Rank by interest, not by ugliness.** Ugly code nobody touches costs nothing. Mediocre code you change every week costs a lot. Use the "most changed files" command from the triage checklist.
+- **Link entries to evidence:** incidents, recurring bugs, slow features.
+- **Review it monthly**, and celebrate the "Done" section growing. It's the most honest progress report your project has.
+- **Tell the AI about it.** "Read DEBT.md before starting; don't make D2 worse" keeps new sessions from adding a fourth date helper.
+
+### 7. The boy scout routine: a little cleanup every week
+
+The old rule: *leave the campground cleaner than you found it.* Applied to code, it means every time you touch an area, you leave it slightly better. Plus a small, scheduled cleanup so debt repayment isn't something you only do when things are on fire.
+
+**Every change (2-10 minutes):**
+
+- Delete dead code and unused imports in the files you touched.
+- Rename one confusing variable or magic number you had to puzzle over.
+- Add one missing test for the behavior you just changed.
+- If you added a shortcut, add it to `DEBT.md`.
+
+**Weekly (30-60 minutes, same time every week):**
+
+1. Check the error tracker: any recurring issue that points at a structural problem? Add it to the register.
+2. Pick **one** item from `DEBT.md` (highest interest you can finish in the time box).
+3. Fix it in small commits, tests passing at each step.
+4. Run a quick dependency check (`npm outdated` / `npm audit`, `pip list --outdated` / `pip-audit`) and note anything risky (security updates first; see [Module 2](02-security-vulnerabilities.md)).
+5. Delete one thing: a stale feature flag, an unused env var, an abandoned branch, a dead file.
+6. Update `DEBT.md` and the rules file if you learned something.
+
+**Monthly (1-2 hours):** run the debt triage checklist, review alerts for noise ([Module 6](06-observability.md)), and do a quick restore or rollback drill on rotation ([Module 7](07-data-modeling.md), [Module 8](08-deployment.md)).
+
+Small, regular payments beat heroic refactoring weekends. The weekend never comes, and when it does, you're too far behind.
+
+### 8. Worked example: refactoring the date mess, with tests
+
+Let's fix Alex's streak bug from the Vibe Fail properly. The original code:
+
+```ts
+// BEFORE — lib/streaks.ts (dates handled in UTC by accident)
+export function dayKey(d: Date): string {
+  return d.toISOString().slice(0, 10); // UTC calendar day, not the user's!
+}
+
+export function currentStreak(checkIns: Date[], now: Date): number {
+  const days = new Set(checkIns.map(dayKey));
+  let streak = 0;
+  let cursor = new Date(now);
+  while (days.has(dayKey(cursor))) {
+    streak++;
+    cursor = new Date(cursor.getTime() - 24 * 60 * 60 * 1000);
+  }
+  return streak;
+}
+```
+
+Two problems hiding in eight lines: `toISOString()` gives the **UTC** day, not the user's day; and stepping back exactly 24 hours breaks on days that are 23 or 25 hours long (daylight saving changes; see [Module 7](07-data-modeling.md)).
+
+**Step 1: characterization tests** (commit: "Pin current streak behavior"). Capture what the code does today, *including* the bug, clearly labeled:
+
+```ts
+// Step 1 — characterization tests: pin down what the code does TODAY (bug included)
+import { describe, expect, it } from "vitest";
+import { currentStreak } from "./before";
+
+describe("currentStreak (current behavior)", () => {
+  it("counts consecutive UTC days", () => {
+    const checkIns = [new Date("2026-03-01T12:00:00Z"), new Date("2026-03-02T12:00:00Z")];
+    expect(currentStreak(checkIns, new Date("2026-03-02T18:00:00Z"))).toBe(2);
+  });
+
+  it("KNOWN BUG: a New York evening check-in lands on the next UTC day", () => {
+    // 6pm Mar 1 and 8pm Mar 2 in New York = 23:00Z Mar 1 and 01:00Z Mar 3
+    const checkIns = [new Date("2026-03-01T23:00:00Z"), new Date("2026-03-03T01:00:00Z")];
+    const now = new Date("2026-03-03T02:00:00Z"); // 9pm Mar 2 in New York
+    expect(currentStreak(checkIns, now)).toBe(1); // the user expects 2
+  });
+});
+```
+
+Now you have a safety net and a precise, reproducible statement of the bug.
+
+**Step 2: introduce the single source of truth** (commit: "Add lib/dates.ts with localDay and previousDay"). New code, new tests, nothing uses it yet:
+
+```ts
+// AFTER — lib/dates.ts: the ONE place that turns instants into calendar days
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+/** The user's local calendar day for an instant, as "YYYY-MM-DD". */
+export function localDay(date: Date, timeZone: string): string {
+  let fmt = formatters.get(timeZone);
+  if (!fmt) {
+    // en-CA formats dates as YYYY-MM-DD
+    fmt = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+    formatters.set(timeZone, fmt);
+  }
+  return fmt.format(date);
+}
+
+/** The calendar day before "YYYY-MM-DD". Pure date math: no time zones, no DST surprises. */
+export function previousDay(day: string): string {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
+}
+```
+
+**Step 3: switch callers one at a time** (one commit each): the email summary, the calendar view, then the export. Run tests after each. Delete each old helper once nothing references it (your editor's "Find All References" or `rg "emailDay"` tells you when).
+
+**Step 4: fix the bug, as its own commit** (commit: "Fix streaks to use the user's local day"). This is a deliberate behavior change, so the test that pinned the bug is replaced by one that states the requirement:
+
+```ts
+// AFTER — lib/streaks.ts
+import { localDay, previousDay } from "./dates";
+
+export function currentStreak(checkIns: Date[], now: Date, timeZone: string): number {
+  const days = new Set(checkIns.map((d) => localDay(d, timeZone)));
+  let streak = 0;
+  for (let day = localDay(now, timeZone); days.has(day); day = previousDay(day)) {
+    streak++;
+  }
+  return streak;
+}
+```
+
+```ts
+import { describe, expect, it } from "vitest";
+import { localDay, previousDay } from "./dates";
+import { currentStreak } from "./streaks";
+
+describe("localDay", () => {
+  it("uses the user's time zone, not UTC", () => {
+    expect(localDay(new Date("2026-03-01T03:30:00Z"), "America/New_York")).toBe("2026-02-28");
+  });
+  it("handles half-hour offsets", () => {
+    expect(localDay(new Date("2026-03-01T20:00:00Z"), "Asia/Kolkata")).toBe("2026-03-02");
+  });
+});
+
+describe("previousDay", () => {
+  it("crosses month, leap-day, and year boundaries", () => {
+    expect(previousDay("2026-03-01")).toBe("2026-02-28");
+    expect(previousDay("2028-03-01")).toBe("2028-02-29");
+    expect(previousDay("2027-01-01")).toBe("2026-12-31");
+  });
+});
+
+describe("currentStreak", () => {
+  const NY = "America/New_York";
+
+  it("FIXED: New York evening check-ins count on the local day", () => {
+    const checkIns = [new Date("2026-03-01T23:00:00Z"), new Date("2026-03-03T01:00:00Z")];
+    expect(currentStreak(checkIns, new Date("2026-03-03T02:00:00Z"), NY)).toBe(2);
+  });
+
+  it("survives the DST change (Mar 8, 2026 has 23 hours in New York)", () => {
+    const checkIns = [
+      new Date("2026-03-08T01:30:00Z"), // 8:30pm Mar 7 (EST)
+      new Date("2026-03-09T00:30:00Z"), // 8:30pm Mar 8 (EDT)
+      new Date("2026-03-10T00:30:00Z"), // 8:30pm Mar 9 (EDT)
+    ];
+    expect(currentStreak(checkIns, new Date("2026-03-10T01:00:00Z"), NY)).toBe(3);
+  });
+
+  it("is 0 when there is no check-in today", () => {
+    expect(currentStreak([new Date("2026-03-01T12:00:00Z")], new Date("2026-03-03T12:00:00Z"), NY)).toBe(0);
+  });
+});
+```
+
+(All of the code and tests in this section run as shown under Vitest.)
+
+Look at what made this safe:
+
+- Behavior was pinned **before** anything changed.
+- Structure changes (steps 2-3) and behavior changes (step 4) were in **separate commits**. If something breaks, `git bisect` ([Module 3](03-reading-code.md)) points straight at the culprit.
+- The tests include the edge cases that caused the spiral in the first place: evening check-ins, half-hour time zones, leap days, and DST.
+- Each step was small enough to review in a minute.
+
+The AI can do every one of these steps for you, *one at a time*, using Prompt Templates 3 and 4. What it can't do is decide the steps, the order, and when each one is verified. That part is engineering.
+
+### 9. Graduation: from vibe coder to AI-assisted engineer
 
 Remember the README's first principles? Understand the problem, consider what can go wrong, make trade-offs consciously, design for verification and observation, account for the full lifecycle, validate assumptions with evidence, and own the outcome. Every module in this course was one of those principles turned into habits.
 
