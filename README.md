@@ -2,6 +2,8 @@
 
 ### The intervention for people who ship AI-generated code and then act surprised when it catches fire.
 
+![vibe_banner](LisSt.jpg)
+
 > You prompted.  
 > The AI wrote the code.  
 > You hit Accept All.  
