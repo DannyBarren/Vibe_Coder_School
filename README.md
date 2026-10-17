@@ -9,10 +9,8 @@ Just because you *can* prompt your way to a working prototype and juggle 20 thin
 
 This course is here to help you be a better professional and deliver better, more secure, and longer-lasting products. AI has hypnotized a lot of people — including some already accomplished professionals — into lazy prompting and careless shipping. If you resist that temptation and actually do the careful, diligent work, you will surpass almost everyone else. Attention to detail and real due diligence matter more now than they ever have.
 
-### Who this is for
-People who are productive with AI coding tools and want to stop the cycle of “it works… until it doesn’t.” You’re not trying to abandon AI. You’re trying to stop using it in a way that creates preventable harm and unmaintainable messes.
-
 ### A Question for Vibe Coders
+
 You are using AI to do your work, and AI outputs long explanations of what it did after doing the work for you… but you don’t read them?
 
 Just reading what the AI wrote will show you some of the holes. Why not do that if you are not even going to read your own code?
@@ -20,6 +18,7 @@ Just reading what the AI wrote will show you some of the holes. Why not do that 
 We will cover that in this course. If you are not going to even read your own code, at least read what the AI says.
 
 ### A Hard Truth
+
 You will not like some of what I say, but here it is: pure vibe coding is not engineering.
 
 Engineering is not a degree. It is not a course. Engineering is a specific way of approaching a problem and a task. It is a method of thinking that abides by a set of first principles and a structured model of cognition used to tackle the task of creating a solution.
@@ -40,7 +39,12 @@ Therefore, vibe coding is not engineering. There, I proved it.
 
 To be an engineer, you have to abide by those first principles, and that requires careful attention to detail.
 
+### Who this is for
+
+People who are productive with AI coding tools and want to stop the cycle of “it works… until it doesn’t.” You’re not trying to abandon AI. You’re trying to stop using it in a way that creates preventable harm and unmaintainable messes.
+
 ### What you’ll learn
+
 We start with security, because that’s where the real damage happens.
 
 **Modules 1–2: Why Vibe Coding Gets People Hacked**  
@@ -55,6 +59,7 @@ Then the rest of the fundamentals that keep software healthy over time:
 - Tech debt and knowing when careful work beats more prompting
 
 ### The point
+
 You can still move fast with AI.  
 You’ll just stop moving so fast that you leave obvious security holes and maintenance landmines behind.
 
