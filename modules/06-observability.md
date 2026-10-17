@@ -304,6 +304,163 @@ Using AI in this loop is great, *if you give it evidence.* "It's broken, fix it"
 
 Hard truth: if you can't explain *why* the fix works, you haven't fixed the bug. You've moved it.
 
+### 10. Request IDs, end to end
+
+"Use request IDs" is easy advice. Here's what it looks like wired up, in a small Express app (the same idea applies to Next.js middleware, FastAPI middleware, or any framework). This code runs as shown:
+
+```js
+// server.js — request IDs flowing through every log line
+import express from "express";
+import pino from "pino";
+import pinoHttp from "pino-http";
+import { randomUUID } from "node:crypto";
+
+const logger = pino({
+  level: process.env.LOG_LEVEL ?? "info",
+  redact: ["req.headers.authorization", "req.headers.cookie"],
+});
+
+const app = express();
+app.use(express.json());
+
+app.use(
+  pinoHttp({
+    logger,
+    // Reuse an incoming ID (from a proxy or the frontend) or create one
+    // (incoming IDs are user input: accept only short, simple values)
+    genReqId: (req, res) => {
+      const incoming = req.headers["x-request-id"];
+      const id = typeof incoming === "string" && /^[\w-]{1,64}$/.test(incoming) ? incoming : randomUUID();
+      res.setHeader("x-request-id", id); // the client can show/report it
+      return id;
+    },
+  })
+);
+
+app.post("/api/orders", async (req, res, next) => {
+  try {
+    req.log.info({ itemCount: req.body.items?.length ?? 0 }, "creating order");
+    const order = await createOrder(req.body, req.log, req.id);
+    req.log.info({ orderId: order.id }, "order created");
+    res.status(201).json(order);
+  } catch (err) {
+    next(err);
+  }
+});
+
+async function createOrder(body, log, requestId) {
+  log.debug("reserving inventory");
+  // Pass the ID to downstream services so their logs can be joined to yours
+  // await fetch(INVENTORY_URL, { headers: { "x-request-id": requestId }, ... })
+  if (!body.items?.length) throw Object.assign(new Error("Order has no items"), { status: 422 });
+  return { id: "ord_" + randomUUID().slice(0, 8), items: body.items };
+}
+
+// Global error handler: full details to logs, safe message + request ID to the user
+app.use((err, req, res, _next) => {
+  const status = err.status ?? 500;
+  req.log.error({ err }, "request failed");
+  res.status(status).json({
+    error: status === 500 ? "Something went wrong. Please try again." : err.message,
+    requestId: req.id,
+  });
+});
+
+app.listen(3000);
+```
+
+Send one bad request with `x-request-id: req_7f3a` and the logs look like this (trimmed; pino-http also attaches request details to each line by default, which you can slim down with custom serializers):
+
+```text
+{"level":30,"time":...,"req":{"id":"req_7f3a","method":"POST","url":"/api/orders"},"itemCount":0,"msg":"creating order"}
+{"level":50,"time":...,"req":{"id":"req_7f3a",...},"err":{"type":"Error","message":"Order has no items","stack":"...","status":422},"msg":"request failed"}
+{"level":30,"time":...,"req":{"id":"req_7f3a",...},"res":{"statusCode":422},"responseTime":4,"msg":"request completed"}
+```
+
+And the user gets `{"error":"Order has no items","requestId":"req_7f3a"}`. Now the full chain works:
+
+1. The user (or your support form) reports `req_7f3a`.
+2. You search your logs for `req_7f3a` and get every line from that request, in order: what came in, what happened, what failed, how long it took.
+3. If you passed the ID to downstream services (the commented-out `fetch` header), their logs join up too.
+4. If you also tag your error tracker with it (most SDKs let you set a tag such as `request_id` per request), the exception and the logs point at each other.
+
+Two details that matter: incoming IDs are **user input**, so validate them (the regex above) before echoing them into logs and responses; and in serverless platforms, many already generate a request ID for you. Use theirs if it's exposed, so your logs line up with the platform's.
+
+### 11. A sample log-line schema
+
+Consistency is what makes logs searchable. Pick field names once, write them down (in `AGENTS.md` too, so the AI uses them), and stick to them:
+
+| Field | Example | Notes |
+|---|---|---|
+| `time` | `2026-10-17T22:41:07.312Z` | UTC, ISO 8601 (or epoch ms, consistently) |
+| `level` | `info` / `warn` / `error` | Use the levels from section 3 |
+| `msg` | `"order created"` | Short, constant, past tense. Put variables in fields, not in the message |
+| `requestId` | `req_7f3a` | On every line of a request |
+| `userId` / `accountId` | `u_123` | Internal IDs only, never emails or names |
+| `route` | `POST /api/orders` | The route pattern, not the full URL with IDs and query strings |
+| `durationMs` | `231` | For requests and slow operations |
+| `status` | `422` | HTTP status, for request-completed lines |
+| `err` | `{type, message, stack}` | Error objects, serialized by the logger |
+| `release` | `a1b2c3d` | Git SHA of the deployed code, so you can tie errors to a deploy |
+| `env` | `production` | Never mix environments in one search without knowing |
+| *domain fields* | `orderId`, `invoiceId`, `jobId` | Whatever lets you find "the thing" later |
+
+The rule about `msg` is the one people break most. `"order o_987 created for u_123"` can't be grouped or counted; `{"msg":"order created","orderId":"o_987","userId":"u_123"}` can. "How many orders were created per hour yesterday?" becomes a query instead of a regex adventure.
+
+### 12. Alert fatigue: fewer, better alerts
+
+The failure mode after "no alerts" is "so many alerts that none of them mean anything." Signs you're there: you've muted the alert channel; you glance at alerts and think "that one always fires"; real problems were reported by customers even though an alert technically fired.
+
+How to keep alerts meaningful:
+
+- **Every alert must have an action.** If the honest response is "huh, okay," it's not an alert. Turn it into a dashboard item or a weekly report.
+- **Alert on symptoms, not causes.** "Checkout error rate above 5% for 10 minutes" (users are hurting) beats "CPU above 80%" (maybe nothing is wrong).
+- **Use durations.** A single failed request isn't an incident. Sustained failure for 5 to 10 minutes is.
+- **Two severities are enough for a small app.** *Page* (wake me up: site down, payments failing, data at risk) and *ticket* (look at it today: disk filling, a new low-volume error type). Route them differently.
+- **Group and deduplicate.** Error trackers group identical exceptions; make sure you're notified on *new* issues and *regressions*, not on every occurrence.
+- **Review monthly.** For each alert that fired: was it real, did someone act, was it fast enough? Delete or tune the noisy ones. Add one for any incident that no alert caught.
+- **Write a one-line runbook into the alert.** "Checkout errors high → check error tracker for newest release; roll back if it started after a deploy (see playbook)." At 3 a.m., you won't remember.
+
+### 13. A minimal observability stack for solo builders
+
+You don't need an enterprise observability platform. A sensible starting stack for a solo builder or small team, most of which is free or cheap at small scale (check current pricing; free tiers change):
+
+| Need | Start with | Notes |
+|---|---|---|
+| Logs | Your hosting platform's built-in logs (most collect stdout) + a structured logger (pino, structlog) | Upgrade to a log service when you need longer retention or better search |
+| Errors | Sentry or a similar error tracker, frontend + backend | Usually the highest-value 15 minutes in this module |
+| Uptime | An external uptime monitor (UptimeRobot, Better Stack, or similar) hitting `/health` every 1-5 minutes | Must run *outside* your infrastructure |
+| Metrics | Your platform's and database provider's built-in dashboards | Request counts, latency, error rates, DB connections |
+| Business signals | A daily query or tiny dashboard: signups, orders, payments | A scheduled job that emails you yesterday's numbers works fine |
+| Costs | Billing alerts on every provider ([Module 8](08-deployment.md)) | A cost spike is often your first sign of a bug or abuse |
+| Notifications | One channel you actually watch (phone push for pages, email for tickets) | Not a Slack channel you muted in March |
+
+Setup order if you're starting from nothing: error tracker → structured logging with request IDs → health endpoint + uptime monitor → billing alerts → one business-metric check. That's an afternoon, and it moves you from "you don't know" to "you'll know."
+
+### 14. Worked case: debugging from evidence
+
+*(Illustrative case, built from very common patterns.)*
+
+**Symptom:** Tuesday 2:10 p.m., two customers email "checkout is broken." A third says it worked fine.
+
+**The vibe approach** would be pasting "checkout is broken, fix it" into the AI, which would guess (maybe the Stripe key? maybe CORS?), change three things, and deploy. Instead:
+
+**1. Locate.** The error tracker shows a new issue since 1:52 p.m.: `TypeError: Cannot read properties of undefined (reading 'priceCents')` in `calculateTotal`, release `9c41e2a`, 37 events, 19 users.
+
+**2. Read the whole error.** The stack trace goes `POST /api/checkout → orderService.createOrder → pricing.calculateTotal`, failing at `item.product.priceCents`.
+
+**3. Gather context.** Release `9c41e2a` was deployed at 1:48 p.m. Filtering logs by `route: POST /api/checkout` and `level: error`, every failure has `itemCount` ≥ 1 and includes product `p_221`. Successful checkouts in the same period don't include `p_221`. Looking at `git show 9c41e2a`: an AI-written change that "optimized" the product query to exclude inactive products. Product `p_221` was marked inactive that morning but is still in some customers' carts.
+
+**4. Hypothesis that explains *all* the evidence:** the new query returns no product for inactive items still sitting in carts, so `item.product` is `undefined`. It explains the timing (deploy at 1:48), the subset of users (only carts containing `p_221`), and the exact error.
+
+**5. Verify before fixing.** In staging, add an inactive product to a cart and check out. Same `TypeError`. Confirmed.
+
+**6. Mitigate, then fix.** Roll back to the previous release to stop the bleeding ([Module 8](08-deployment.md)); errors stop within minutes. Then write a failing test first ("checkout with an inactive product in the cart returns a clear 409 'item no longer available' and does not crash"), fix the code to handle missing products explicitly, and ship through CI.
+
+**7. Confirm.** After deploy, the issue stays quiet in the error tracker; checkout success rate returns to normal. Reply to the three customers.
+
+Total time: about 40 minutes, most of it spent *reading*, not changing. Notice that the AI was useful at step 3 ("explain what this commit changed in the product query") and step 6 ("write a test for this scenario"), as a tool working from evidence instead of an oracle guessing in the dark.
+
 ---
 
 ## What Good Looks Like

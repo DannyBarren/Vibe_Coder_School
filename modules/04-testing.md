@@ -268,6 +268,350 @@ You don't need the tools to use the idea. Do it by hand:
 
 This is also the best way to evaluate tests the AI wrote. Ask it to write tests, then break the code yourself and see if they notice. Theater tests won't.
 
+### 8. Worked example: from weak tests to strong tests
+
+Let's do the whole thing once, start to finish, on a small function. The requirements (written by a human, in English, *before* any code):
+
+> - US orders under $50.00 pay $5.00 shipping.
+> - US orders of $50.00 **or more** ship free.
+> - International orders always pay $15.00.
+> - An empty cart ($0) ships for $0.
+> - Country codes are two letters, case-insensitive. Anything else is an error.
+> - Subtotals are whole cents, never negative. Anything else is an error.
+
+**Step 1: the AI's first implementation** has a classic off-by-one: `subtotalCents > 5000` instead of `>=`. A $50.00 order gets charged shipping.
+
+**Step 2: the AI's weak tests.** Asked to "write tests for shippingCents," it reads the code and produces:
+
+```js
+// The AI's tests: derived from the code, not the requirements
+it("returns shipping for US orders", () => {
+  expect(shippingCents(5000, "US")).toBe(500); // enshrines the off-by-one bug
+});
+it("returns a number", () => {
+  expect(typeof shippingCents(100, "CA")).toBe("number"); // passes for any number at all
+});
+```
+
+Both green. One protects the bug; the other would pass if the function returned `-7`. No edge cases, no bad input, no boundary.
+
+**Step 3: strong tests, written from the requirements.** Here's the corrected function and tests that would have caught the bug on the first run (Vitest; Jest is nearly identical, just drop the import line):
+
+```js
+// shipping.js
+export const FREE_SHIPPING_THRESHOLD_CENTS = 5000; // $50.00
+export const US_FLAT_RATE_CENTS = 500;             // $5.00
+export const INTERNATIONAL_FLAT_RATE_CENTS = 1500; // $15.00
+
+export function shippingCents(subtotalCents, country) {
+  if (!Number.isInteger(subtotalCents) || subtotalCents < 0) {
+    throw new RangeError("subtotalCents must be a non-negative integer");
+  }
+  if (typeof country !== "string" || !/^[A-Za-z]{2}$/.test(country)) {
+    throw new TypeError("country must be a 2-letter code");
+  }
+  if (subtotalCents === 0) return 0; // empty cart ships nothing
+  if (country.toUpperCase() === "US") {
+    return subtotalCents >= FREE_SHIPPING_THRESHOLD_CENTS ? 0 : US_FLAT_RATE_CENTS;
+  }
+  return INTERNATIONAL_FLAT_RATE_CENTS;
+}
+```
+
+```js
+// shipping.test.js
+import { describe, it, expect } from "vitest";
+import { shippingCents } from "./shipping.js";
+
+describe("shippingCents", () => {
+  // Happy paths: expected values come from the requirements, not from running the code
+  it("charges $5 for US orders under $50", () => {
+    expect(shippingCents(4999, "US")).toBe(500);
+  });
+
+  it("is free for US orders of exactly $50 (boundary)", () => {
+    expect(shippingCents(5000, "US")).toBe(0);
+  });
+
+  it("is free for US orders over $50", () => {
+    expect(shippingCents(12000, "US")).toBe(0);
+  });
+
+  it("charges $15 for international orders, even large ones", () => {
+    expect(shippingCents(4999, "CA")).toBe(1500);
+    expect(shippingCents(50000, "DE")).toBe(1500);
+  });
+
+  // Edge cases
+  it("charges nothing for an empty cart", () => {
+    expect(shippingCents(0, "US")).toBe(0);
+    expect(shippingCents(0, "FR")).toBe(0);
+  });
+
+  it("accepts lowercase country codes", () => {
+    expect(shippingCents(1000, "us")).toBe(500);
+  });
+
+  // Negative tests: bad input is refused, loudly
+  it.each([-1, 10.5, NaN, "5000", null])("rejects invalid subtotal %s", (bad) => {
+    expect(() => shippingCents(bad, "US")).toThrow(RangeError);
+  });
+
+  it.each(["", "USA", "1A", undefined])("rejects invalid country %s", (bad) => {
+    expect(() => shippingCents(1000, bad)).toThrow(TypeError);
+  });
+});
+```
+
+The same thing in Python with pytest. `parametrize` turns a table of cases into individual tests, which is the cleanest way to cover boundaries:
+
+```python
+# shipping.py
+FREE_SHIPPING_THRESHOLD_CENTS = 5000  # $50.00
+US_FLAT_RATE_CENTS = 500              # $5.00
+INTERNATIONAL_FLAT_RATE_CENTS = 1500  # $15.00
+
+
+def shipping_cents(subtotal_cents: int, country: str) -> int:
+    if type(subtotal_cents) is not int or subtotal_cents < 0:  # rejects bools and floats too
+        raise ValueError("subtotal_cents must be a non-negative integer")
+    if not isinstance(country, str) or len(country) != 2 or not country.isalpha():
+        raise ValueError("country must be a 2-letter code")
+    if subtotal_cents == 0:
+        return 0
+    if country.upper() == "US":
+        return 0 if subtotal_cents >= FREE_SHIPPING_THRESHOLD_CENTS else US_FLAT_RATE_CENTS
+    return INTERNATIONAL_FLAT_RATE_CENTS
+```
+
+```python
+# test_shipping.py
+import pytest
+from shipping import shipping_cents
+
+
+@pytest.mark.parametrize(
+    "subtotal, country, expected",
+    [
+        (4999, "US", 500),    # just under the threshold
+        (5000, "US", 0),      # exactly at the threshold: free (boundary!)
+        (12000, "US", 0),     # well over
+        (1000, "us", 500),    # lowercase accepted
+        (4999, "CA", 1500),   # international flat rate
+        (50000, "DE", 1500),  # international never free
+        (0, "US", 0),         # empty cart
+        (0, "FR", 0),
+    ],
+)
+def test_shipping_rules(subtotal, country, expected):
+    assert shipping_cents(subtotal, country) == expected
+
+
+@pytest.mark.parametrize("bad_subtotal", [-1, 10.5, "5000", None, True])
+def test_rejects_invalid_subtotal(bad_subtotal):
+    with pytest.raises(ValueError):
+        shipping_cents(bad_subtotal, "US")
+
+
+@pytest.mark.parametrize("bad_country", ["", "USA", "1A", None])
+def test_rejects_invalid_country(bad_country):
+    with pytest.raises(ValueError):
+        shipping_cents(1000, bad_country)
+```
+
+Notice what changed from the weak version:
+
+- Every expected value traces back to a line of the requirements.
+- The **boundary** (exactly $50.00) has its own test. Off-by-one bugs live on boundaries.
+- Bad input has tests that prove it's **refused**, not silently accepted.
+- The Python version rejects `True` explicitly, because in Python `True` is technically an `int` (and equals 1). That's exactly the kind of edge case that only shows up when you go looking for it.
+- Run the buggy `>` version against these tests and the boundary test fails immediately. That's the point.
+
+### 9. Testing an API endpoint, with auth and fixtures
+
+Unit tests cover the function. Integration tests cover the **endpoint**: routing, auth, validation, data access, and status codes together. Here's a complete, runnable example in Python (FastAPI + pytest). The app uses an in-memory store so you can run it anywhere; in your project, the fixtures would reset a real **test** database instead.
+
+```python
+# app.py — a tiny invoices API (in-memory store so the example runs anywhere)
+from fastapi import Depends, FastAPI, Header, HTTPException
+
+app = FastAPI()
+INVOICES: dict[str, dict] = {}   # invoice_id -> {"id", "owner_id", "amount_cents"}
+TOKENS: dict[str, str] = {}      # token -> user_id (stand-in for real session auth)
+
+
+def current_user_id(authorization: str | None = Header(default=None)) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not logged in")
+    user_id = TOKENS.get(authorization.removeprefix("Bearer "))
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return user_id
+
+
+@app.get("/invoices/{invoice_id}")
+def get_invoice(invoice_id: str, user_id: str = Depends(current_user_id)):
+    invoice = INVOICES.get(invoice_id)
+    if invoice is None or invoice["owner_id"] != user_id:
+        raise HTTPException(status_code=404, detail="Not found")  # 404, not 403: don't confirm it exists
+    return invoice
+```
+
+**Fixtures** are pytest's way of giving each test fresh, known data. **Factories** (`make_user`, `make_invoice`) build realistic records with sensible defaults, so each test only spells out what matters to it:
+
+```python
+# conftest.py — fixtures: fresh, known data for every test
+import pytest
+from fastapi.testclient import TestClient
+import app as app_module
+
+
+@pytest.fixture(autouse=True)
+def clean_store():
+    app_module.INVOICES.clear()
+    app_module.TOKENS.clear()
+    yield
+
+
+@pytest.fixture
+def client():
+    return TestClient(app_module.app)
+
+
+def make_user(user_id: str) -> dict:
+    """Factory: creates a user with a login token and returns auth headers."""
+    token = f"test-token-{user_id}"
+    app_module.TOKENS[token] = user_id
+    return {"id": user_id, "headers": {"Authorization": f"Bearer {token}"}}
+
+
+def make_invoice(owner_id: str, amount_cents: int = 12_500) -> dict:
+    invoice = {"id": f"inv_{owner_id}_{len(app_module.INVOICES) + 1}",
+               "owner_id": owner_id, "amount_cents": amount_cents}
+    app_module.INVOICES[invoice["id"]] = invoice
+    return invoice
+
+
+@pytest.fixture
+def alice():
+    return make_user("alice")
+
+
+@pytest.fixture
+def bob():
+    return make_user("bob")
+
+
+@pytest.fixture
+def alice_invoice(alice):
+    return make_invoice(owner_id=alice["id"])
+```
+
+And the tests themselves read like the permission requirements:
+
+```python
+# test_invoices_api.py — the four auth cases, against the real app
+def test_401_when_not_logged_in(client, alice_invoice):
+    res = client.get(f"/invoices/{alice_invoice['id']}")
+    assert res.status_code == 401
+
+
+def test_401_with_a_garbage_token(client, alice_invoice):
+    res = client.get(f"/invoices/{alice_invoice['id']}", headers={"Authorization": "Bearer nope"})
+    assert res.status_code == 401
+
+
+def test_owner_can_read_their_invoice(client, alice, alice_invoice):
+    res = client.get(f"/invoices/{alice_invoice['id']}", headers=alice["headers"])
+    assert res.status_code == 200
+    assert res.json()["amount_cents"] == 12_500
+
+
+def test_other_user_gets_404_and_no_data(client, bob, alice_invoice):
+    res = client.get(f"/invoices/{alice_invoice['id']}", headers=bob["headers"])
+    assert res.status_code == 404
+    assert "amount_cents" not in res.text
+
+
+def test_missing_invoice_is_404(client, alice):
+    res = client.get("/invoices/does-not-exist", headers=alice["headers"])
+    assert res.status_code == 404
+```
+
+The JavaScript equivalent uses `beforeEach` to reset and seed the test database, and a request library such as Supertest (shown in section 5). The pattern is identical: **reset → seed known data with factories → act as a specific user → assert status and body.**
+
+**Test data rules:**
+
+- Every test starts from a known state. No test depends on data left behind by another test, or on the order tests run in.
+- Use factories with defaults instead of giant shared fixtures. When a test needs "an expired coupon," it says `make_coupon(expires_at=yesterday)`, and everything else gets a sane default.
+- Never point tests at production, and never copy real customer data into test fixtures. Use obviously fake data (`alice@example.com`; the `example.com` domain is reserved for exactly this).
+- Keep at least **two users** in every permission-related test. One-user test suites can't catch "User A sees User B's data."
+
+### 10. Flaky tests: the ones that pass on Tuesdays
+
+A **flaky test** sometimes passes and sometimes fails without any code change. Flaky tests are worse than no tests, because they train everyone (including your AI agent) to rerun until green and ignore red.
+
+| Cause | Symptom | Fix |
+|---|---|---|
+| Real time / dates | Fails near midnight, month-end, or DST changes | Freeze time (fake timers) or pass "now" in as a parameter |
+| Randomness | Fails one run in fifty | Seed the random generator, or inject the random value |
+| Shared state | Passes alone, fails in the full suite (or vice versa) | Reset state in `beforeEach`/fixtures; no globals between tests |
+| Order dependence | Fails when tests run in a different order or in parallel | Each test creates its own data |
+| Real network calls | Fails when a third-party API is slow or down | Use the provider's test mode or a fake at the boundary |
+| Timing / async | `sleep(500)` "fixes" it, mostly | Await the actual condition (the promise, the element appearing), never a fixed delay |
+
+Time is the most common culprit. Here's a function that depends on the clock, and a test that controls the clock instead of hoping:
+
+```js
+// trial.js
+const TRIAL_LENGTH_MS = 14 * 24 * 60 * 60 * 1000;
+
+export function isTrialExpired(signupAt) {
+  return Date.now() - signupAt.getTime() > TRIAL_LENGTH_MS;
+}
+```
+
+```js
+// trial.test.js
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isTrialExpired } from "./trial.js";
+
+describe("isTrialExpired", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-15T12:00:00Z")); // "now" is fixed for every test
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is not expired exactly 14 days after signup", () => {
+    expect(isTrialExpired(new Date("2026-03-01T12:00:00Z"))).toBe(false);
+  });
+
+  it("is expired one millisecond after 14 days", () => {
+    expect(isTrialExpired(new Date("2026-03-01T11:59:59.999Z"))).toBe(true);
+  });
+});
+```
+
+In Python, the cleanest fix is to make "now" a parameter (`def is_trial_expired(signup_at, now)`) and pass a fixed datetime in tests; libraries like `freezegun` or `time-machine` can freeze the clock when you can't change the signature.
+
+**Policy:** when a test flakes, fix it within a day or delete it and write a better one. Never let "just rerun it" become a habit, and never let the AI "fix" a flaky test by adding retries or longer sleeps.
+
+### 11. What to test first in an existing, untested app
+
+You have an app with zero tests and limited time. Don't ask the AI for "comprehensive tests" (you'll get 200 theater tests). Prioritize by **what would hurt most if it broke**:
+
+1. **Authorization on user data.** The four auth cases for every route that reads or writes another person's data. Highest risk, highest value.
+2. **Money.** Prices, totals, discounts, credits, refunds, plan limits. Unit tests with boundaries.
+3. **The critical journey.** One E2E test each for signup, login, and your core paid or value-delivering action.
+4. **Anything that has broken before.** Every bug you fix from now on gets a regression test that fails before the fix and passes after. This alone builds a valuable suite within months.
+5. **Data transformations.** Imports, exports, parsing, date logic, anything that turns one shape of data into another.
+6. **Everything else**, opportunistically: when you touch a file, leave it with a test it didn't have before.
+
+A realistic first week: 4 auth tests for your most sensitive route, 10 unit tests for your pricing or core rule, 1 E2E test for signup-to-core-action, CI running all of them. That's maybe a day of focused work, and it covers the failures that end businesses.
+
 ---
 
 ## What Good Looks Like

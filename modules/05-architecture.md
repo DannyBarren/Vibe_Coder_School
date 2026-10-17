@@ -300,6 +300,256 @@ Check your tool's current docs for the exact file name; the idea is the same eve
 
 Keep it updated. When the AI does something you don't want twice, that's a new rule. When you make an architecture decision, write a one-line note (some teams keep a `docs/decisions/` folder of short "Architecture Decision Records" explaining what was decided and why).
 
+### 9. Before and after: a folder structure refactor
+
+*(Illustrative, but this is what most AI-grown projects look like around month two.)*
+
+**Before**: five AI sessions, five ideas about where things go:
+
+```text
+src/
+  components/
+    Dashboard.tsx          # 2,900 lines: UI + fetching + billing rules + email template
+    dashboard-utils.ts     # formatDate #1
+    ProjectCard.tsx        # calls supabase directly
+  utils/
+    helpers.ts             # formatDate #2, formatMoney, isPro (client-side!)
+    data/fetchProjects.ts  # one of three ways to fetch projects
+  lib/
+    services/projects.ts   # ...way two
+    supabase.ts            # client created here
+    supabaseClient.ts      # ...and also here
+  api/
+    stripe-webhook.ts      # Stripe SDK imported here
+  app/api/
+    checkout/route.ts      # ...and here, with prices computed inline
+    projects/route.ts      # ...way three of fetching projects
+```
+
+**After**: feature folders, one way to do each thing:
+
+```text
+src/
+  app/                       # routes and pages only (thin)
+    api/checkout/route.ts
+    api/projects/route.ts
+    api/webhooks/stripe/route.ts
+    dashboard/page.tsx
+  features/
+    projects/
+      components/ProjectList.tsx  ProjectCard.tsx  ProjectFilters.tsx
+      projects.service.ts   # business rules
+      projects.repo.ts      # the ONLY place that queries projects
+      projects.test.ts
+    billing/
+      components/BillingBanner.tsx
+      billing.service.ts    # hasProFeatures() lives here, server-side
+      billing.test.ts
+  shared/
+    db.ts                   # one database client
+    config.ts               # one place that reads env vars
+    format.ts               # one formatDate, one formatMoney
+    payments/               # Stripe wrapped behind an interface (see section 12)
+    llm/
+```
+
+**How to get from before to after without breaking everything:**
+
+1. Commit. Write the target structure into your rules file first, so the AI knows where things are going.
+2. Add a few E2E or integration tests around the most important flows ([Module 4](04-testing.md)).
+3. Consolidate the duplicates first: pick the one `formatDate`, the one database client, the one `fetchProjects`. Update callers. Delete the losers. One commit per consolidation.
+4. Move files into the new folders **without changing their contents** (pure moves are easy to review: the diff shows a rename, not a rewrite). Let your editor update imports.
+5. Then extract logic out of the giant component, one piece per commit (section 6).
+6. Delete empty folders and the old patterns. Update `AGENTS.md` to forbid them.
+
+Don't ask for this in one prompt. "Reorganize the project into feature folders" produces a diff nobody can review and at least one broken import you'll discover in production.
+
+### 10. Architecture Decision Records (ADRs): write down the "why"
+
+Six weeks from now, you (or an AI session, or a hired engineer) will look at a choice and ask "why on earth did we do it this way?" An **Architecture Decision Record** is a short note that answers that question before it's asked. The format comes from Michael Nygard's 2011 post [Documenting Architecture Decisions](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions); it's one or two pages, not a treatise. Nygard's tip: if a decision is reversed, keep the old record and mark it "superseded" instead of deleting it.
+
+Keep them in `docs/decisions/`, numbered:
+
+```markdown
+# ADR 0004: Store money as integer cents
+
+- Status: Accepted
+- Date: 2026-10-17
+
+## Context
+Prices were stored as floats; totals drifted by fractions of a cent and the
+accounting export stopped matching Stripe. Stripe's API uses integer minor units.
+
+## Decision
+All money is stored and computed as integer cents (`*_cents` columns, `number`
+in TypeScript, `int` in Python). Formatting to dollars happens only at display time
+in shared/format.ts.
+
+## Consequences
+- Matches Stripe; no float rounding errors.
+- Requires a migration for existing price columns (expand/contract, see Module 7).
+- Every new money field must follow the `_cents` naming convention.
+
+## Alternatives considered
+- `numeric(12,2)` in Postgres: exact, but JavaScript would still receive strings
+  or floats; more conversion code.
+```
+
+Write one whenever you make a decision that's **hard to reverse** or **non-obvious**: choice of database or auth provider, multi-tenancy approach, where business logic runs, money and time conventions, why you *didn't* adopt something. Then add a one-line pointer in `AGENTS.md` ("see docs/decisions/ before changing money handling"). The AI will follow a recorded decision far more consistently than one that only lives in your head.
+
+### 11. Feeding architecture context to the AI, every session
+
+A rules file is read automatically, but it's general. Each task also needs **specific** context, and AI sessions start with amnesia. A short ritual at the start of every non-trivial task makes the output dramatically more consistent:
+
+1. **Start fresh for new tasks.** A clean session with the right context beats a 300-message conversation where the original decisions scrolled out of the context window long ago.
+2. **Point at the map.** "Read AGENTS.md and docs/decisions/ before starting."
+3. **Point at the neighbors.** "Follow the same pattern as `features/projects/` (service, repo, tests)." An existing example is worth more than any amount of description.
+4. **Name the boundaries.** Which files it may touch, which it must not.
+5. **Ask for a plan first** (Prompt Template 1), approve it, then implement.
+6. **Close the loop.** If the AI did something you had to correct, add a rule so the next session doesn't repeat it.
+
+A session-opener you can paste:
+
+```text
+Context: read AGENTS.md and docs/decisions/. This task follows the existing
+pattern in src/features/projects/ (component → API route → service → repo,
+tests next to the service).
+Task: [one sentence].
+You may modify: [files/folders]. Do not modify anything else.
+First, reply with a plan: files to create/change, their layer, and existing
+code you'll reuse. Wait for my OK before writing code.
+```
+
+### 12. Boundaries for third-party services: wrap them
+
+Your app will depend on outside services: payments (Stripe), AI models (OpenAI, Anthropic, and others), email, storage, maps. The AI's default is to import the vendor SDK wherever it's needed. Six months later, Stripe calls are in eleven files, nobody can test checkout without hitting the network, and switching providers (or even upgrading the SDK) is a project.
+
+The fix is a **boundary**: define what *your app* needs as a small interface, implement it once per provider, and let the rest of the code depend only on the interface.
+
+```ts
+// src/lib/payments/types.ts — what OUR app needs from a payment provider. No Stripe types leak out.
+export interface CheckoutLine {
+  name: string;
+  unitPriceCents: number;
+  quantity: number;
+}
+
+export interface PaymentGateway {
+  createCheckout(input: {
+    orderId: string;
+    lines: CheckoutLine[];
+    successUrl: string;
+    cancelUrl: string;
+  }): Promise<{ checkoutUrl: string; providerSessionId: string }>;
+}
+```
+
+```ts
+// src/lib/payments/stripeGateway.ts — the ONLY file that imports the Stripe SDK
+import Stripe from "stripe";
+import type { PaymentGateway } from "./types";
+
+export function createStripeGateway(secretKey: string): PaymentGateway {
+  const stripe = new Stripe(secretKey);
+
+  return {
+    async createCheckout({ orderId, lines, successUrl, cancelUrl }) {
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        client_reference_id: orderId,
+        line_items: lines.map((l) => ({
+          quantity: l.quantity,
+          price_data: {
+            currency: "usd",
+            unit_amount: l.unitPriceCents,
+            product_data: { name: l.name },
+          },
+        })),
+        success_url: successUrl,
+        cancel_url: cancelUrl,
+      });
+      if (!session.url) throw new Error("Stripe did not return a checkout URL");
+      return { checkoutUrl: session.url, providerSessionId: session.id };
+    },
+  };
+}
+```
+
+```ts
+// src/lib/payments/fakeGateway.ts — for tests and local dev: no network, no money
+import type { PaymentGateway } from "./types";
+
+export function createFakeGateway() {
+  const created: Array<{ orderId: string; totalCents: number }> = [];
+  const gateway: PaymentGateway = {
+    async createCheckout({ orderId, lines }) {
+      const totalCents = lines.reduce((s, l) => s + l.unitPriceCents * l.quantity, 0);
+      created.push({ orderId, totalCents });
+      return { checkoutUrl: `https://example.test/checkout/${orderId}`, providerSessionId: `fake_${orderId}` };
+    },
+  };
+  return { gateway, created }; // tests can inspect `created`
+}
+```
+
+The same idea for an AI model:
+
+```ts
+// src/lib/llm/types.ts
+export interface LlmClient {
+  complete(prompt: string, opts?: { maxTokens?: number; timeoutMs?: number }): Promise<string>;
+}
+```
+
+```ts
+// src/lib/llm/openaiClient.ts — the ONLY file that imports the OpenAI SDK
+import OpenAI from "openai";
+import type { LlmClient } from "./types";
+
+export function createOpenAiClient(apiKey: string, model: string): LlmClient {
+  const client = new OpenAI({ apiKey });
+  return {
+    async complete(prompt, opts = {}) {
+      const res = await client.chat.completions.create(
+        {
+          model,
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: opts.maxTokens ?? 500,
+        },
+        { timeout: opts.timeoutMs ?? 20_000 }
+      );
+      return res.choices[0]?.message?.content ?? "";
+    },
+  };
+}
+```
+
+And one place wires real implementations to the app:
+
+```ts
+// src/lib/providers.ts — one place decides which implementation the app uses
+import { createStripeGateway } from "./payments/stripeGateway";
+import { createOpenAiClient } from "./llm/openaiClient";
+
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing required environment variable ${name}`);
+  return value;
+}
+
+export const payments = createStripeGateway(requireEnv("STRIPE_SECRET_KEY"));
+export const llm = createOpenAiClient(requireEnv("OPENAI_API_KEY"), process.env.OPENAI_MODEL ?? "gpt-4o-mini");
+```
+
+What this buys you:
+
+- **Testability:** business logic takes a `PaymentGateway` or `LlmClient`, and tests pass in the fake. No network, no money, no flakiness ([Module 4](04-testing.md)).
+- **Containment:** an SDK upgrade or a provider's breaking change touches one file.
+- **One place for cross-cutting rules:** timeouts, retries, cost limits, logging, and redaction for every LLM call live in `openaiClient.ts`, not in eleven copies ([Module 6](06-observability.md) and [Module 8](08-deployment.md)).
+- **Real options:** switching or adding a provider is a new implementation of the same interface, not a rewrite.
+
+Don't over-do it (remember the over-engineering red flag in [Module 3](03-reading-code.md)): you don't need a plugin system with a registry. One small interface, one real implementation, one fake. Add the rule to `AGENTS.md`: "Only files in `shared/payments/` may import `stripe`. Only files in `shared/llm/` may import AI SDKs."
+
 ---
 
 ## What Good Looks Like

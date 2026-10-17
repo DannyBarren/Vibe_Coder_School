@@ -71,6 +71,87 @@ A diff is the before-and-after of a change. Lines starting with `-` were removed
 9. **Run it.** Not just the happy path. Try the empty input, the wrong user, the double click.
 10. **Decide: accept, ask for changes, or reject.** Rejecting is allowed. It's often the fastest option.
 
+#### Worked example: annotating a realistic AI diff
+
+*(Illustrative. The diff is invented, but every problem in it is one you'll see in real AI output.)*
+
+You asked: **"Let users update their display name on the profile page."** The AI replied: *"Done! I've added the update endpoint, simplified the auth handling, and added slug generation for nicer profile URLs."*
+
+Two side quests in one sentence ("simplified the auth handling", "added slug generation"). Already suspicious. Here's the server part of the diff:
+
+```diff
+ // app/api/profile/route.ts
+-import { requireUser } from "@/lib/auth";
+-import { UpdateProfileSchema } from "@/lib/schemas";
++import { db } from "@/lib/db";
++import slugify from "slugify-pro";
+ 
+ export async function PATCH(req: Request) {
+-  const user = await requireUser(req);
+-  const input = UpdateProfileSchema.parse(await req.json());
+-  const updated = await profileService.updateDisplayName(user.id, input.displayName);
+-  return Response.json(updated);
++  const body = await req.json();
++  const userId = body.userId;
++  const slug = slugify(body.displayName || "user-" + Math.random());
++
++  try {
++    await db.user.update({
++      where: { id: userId },
++      data: { ...body, slug },
++    });
++  } catch (e) {
++    console.log(e);
++  }
++
++  return Response.json({ success: true });
+ }
+```
+
+Reading it line by line, with the questions from the checklist:
+
+| Line | What it says | What you should think |
+|---|---|---|
+| `-import { requireUser }` | Auth import **deleted** | Deletions first. Who checks that the caller is logged in now? (Nobody.) |
+| `-import { UpdateProfileSchema }` | Validation schema **deleted** | Input is no longer validated. |
+| `+import slugify from "slugify-pro"` | New package | Did I ask for this? Does `slugify-pro` exist, and is it the real one? (The well-known package is `slugify`. A plausible-sounding variant is exactly what a hallucinated or typosquatted package looks like. Check npm before installing anything.) |
+| `const userId = body.userId` | The user ID comes **from the request body** | Anyone can send someone else's ID and edit their profile. This is the classic broken-authorization bug from [Module 2](02-security-vulnerabilities.md). |
+| `Math.random()` in the slug | Random fallback | Magic behavior. Two people with empty names get unpredictable slugs, and nothing guarantees they're unique. |
+| `data: { ...body, slug }` | The whole request body is written to the user row | Mass assignment: a caller can include `role: "admin"`, `plan: "pro"`, or `email` and the database will happily save it. |
+| `catch (e) { console.log(e) }` | Swallowed error | Failure is invisible, and... |
+| `return { success: true }` | Unconditional success | ...the user is told it worked even when it didn't. |
+| `-profileService.updateDisplayName(...)` | Existing service call removed | The project already had a function for this. The AI bypassed the service layer ([Module 5](05-architecture.md)) instead of reusing it. |
+
+Nine findings in a 20-line diff, and the feature "works" in the preview. That's the whole problem with judging by the preview.
+
+What you actually wanted is smaller than what the AI produced:
+
+```ts
+// app/api/profile/route.ts — the reviewed version
+import { requireUser } from "@/lib/auth";
+import { UpdateProfileSchema } from "@/lib/schemas"; // displayName: string, 1–50 chars, trimmed
+
+export async function PATCH(req: Request) {
+  const user = await requireUser(req);                         // identity comes from the session
+  const input = UpdateProfileSchema.parse(await req.json());   // only displayName is accepted
+  const updated = await profileService.updateDisplayName(user.id, input.displayName);
+  return Response.json(updated);                               // errors propagate to the global handler
+}
+```
+
+Slugs, if you want them, are a separate request, a separate diff, and a separate review.
+
+**How to reply to the AI** when a diff looks like this. Don't say "fix the bugs." Be specific:
+
+```text
+Reject this change. Restore requireUser and UpdateProfileSchema. The user ID
+must come from the session, never the request body. Only displayName may be
+updated; do not spread the request body into the database. Do not add
+slugify-pro or any new dependency. Reuse profileService.updateDisplayName.
+Do not catch errors in the route; let the global handler deal with them.
+Show me the new diff.
+```
+
 ### 3. Orienting in an unfamiliar codebase
 
 Whether you inherited a project or just let an agent run for three hours, you'll eventually face a repo you don't understand. Don't read it top to bottom. Read it like a map.
@@ -255,6 +336,54 @@ git log --oneline -10       # recent history
 git restore path/to/file    # throw away changes to one file
 ```
 
+#### Code archaeology: `git log`, `git blame`, and `git bisect` in plain language
+
+Git doesn't just save your work. It's a searchable history of *who changed what, when, and why*. Three commands turn it into a detective kit.
+
+**`git log`: "What happened here recently?"**
+
+```bash
+git log --oneline -20                 # last 20 commits, one line each
+git log --oneline -- src/lib/pricing.ts   # only commits that touched this file
+git log -p -- src/lib/pricing.ts      # same, with the actual changes
+git log -S "applyDiscount" --oneline  # commits that added or removed this exact text
+```
+
+That last one (the "pickaxe") is gold: "When did `applyDiscount` start being called on the checkout page?" One command.
+
+**`git blame`: "Who last touched this line, and in which commit?"**
+
+```bash
+git blame -L 40,60 src/app/checkout/page.tsx   # annotate lines 40-60
+git show <commit-sha>                           # then read that whole commit
+```
+
+Despite the name, blame isn't for blaming. When the "who" is an AI session, it tells you *which prompt* introduced the line, and the commit message (if you wrote a good one) tells you *why*. Most editors show blame inline (in VS Code and Cursor, extensions like GitLens make it a hover).
+
+**`git bisect`: "It worked last week. Which commit broke it?"**
+
+Bisect does a binary search through your history. You tell it one commit that was good and one that's bad; it checks out the middle; you test and say "good" or "bad"; it halves the range again. Even across 100 commits, it finds the culprit in about 7 steps.
+
+```bash
+git bisect start
+git bisect bad                 # the current version is broken
+git bisect good a1b2c3d        # this older commit worked
+# git checks out a commit in the middle. Test it (run the app or a test), then:
+git bisect good                # or: git bisect bad
+# ...repeat until git prints "<sha> is the first bad commit"
+git bisect reset               # return to where you started
+```
+
+If you have a test (or a script) that fails when the bug is present, git can do the whole thing for you:
+
+```bash
+git bisect start HEAD a1b2c3d
+git bisect run npm test -- src/lib/pricing.test.ts
+git bisect reset
+```
+
+Bisect only works well if your commits are **small and each one runs**. That's one more reason for the habits above: a history of "wip", "stuff", and "fix" commits, half of which don't build, turns your detective kit into a pile of noise.
+
 ---
 
 ## What Good Looks Like
@@ -285,6 +414,21 @@ git restore path/to/file    # throw away changes to one file
 - [ ] Do all new methods and packages actually exist (checked in docs, not memory)?
 - [ ] Is it simpler than I feared, or more complex than it needs to be?
 - [ ] Did I run it, including an unhappy path?
+
+**The "every diff" question card** (the short version of everything above; keep it next to your editor):
+
+| # | Question | If the answer is bad... |
+|---|---|---|
+| 1 | What did I ask for, in one sentence? | You can't review what you can't state. Write it down first. |
+| 2 | What did the AI *say* it did, and what are the "also"s? | Each "also" gets reviewed or reverted. |
+| 3 | Which files changed, and should they have? | Unexpected files = stop and ask why. |
+| 4 | What was **deleted**? | Deleted checks, validation, or tests = reject. |
+| 5 | Where does new data come in, and is it validated on the server? | Add validation or reject. |
+| 6 | Where does identity come from: session, or request? | Request-supplied user IDs = reject. |
+| 7 | What happens when it fails? | Swallowed errors or fake success = fix. |
+| 8 | Any new packages, APIs, or methods I haven't verified? | Verify in official docs and registries before accepting. |
+| 9 | Did it duplicate something that already exists? | Point it at the existing function. |
+| 10 | Did I run it, including one unhappy path? | Run it. |
 
 ---
 
