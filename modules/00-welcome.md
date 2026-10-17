@@ -18,6 +18,8 @@ By the end of this module you will be able to:
 3. Say concretely why "pure Accept All" is dangerous once real users, real data, or real money are involved.
 4. Describe the mindset this course asks for: keep the AI, add the engineering.
 5. Do a two-minute honesty check on a project you've already shipped.
+6. Place any project on a simple risk matrix and decide how much engineering it needs.
+7. Use the course's five-step AI workflow: **plan → generate → read → test → verify**.
 
 ---
 
@@ -108,6 +110,59 @@ In practice that means:
 - **Treat the AI as a fast, confident junior developer** who has never met your users, never been paged at 3 a.m., and never been sued.
 - **Verify with evidence**, such as a test, a query run as a logged-out user, or a scan, not with a feeling.
 
+### 6. When is vibe coding fine? A risk matrix
+
+"Should I vibe-code this?" doesn't have one answer. It depends on two things: **who gets hurt if it breaks or leaks**, and **how hard it is to undo**. Find your project in this table:
+
+| Project type | Examples | Who gets hurt if it fails? | Pure vibe coding? | Minimum bar before shipping |
+|---|---|---|---|---|
+| **Throwaway prototype** | A weekend demo, a pitch mock-up, a UI experiment | Nobody (maybe your ego) | ✅ Go for it | Don't put real data in it. Don't deploy it with real keys. |
+| **Personal tool** | A script that renames your files, a habit tracker only you use | You | ✅ Mostly fine | Back up anything it touches. Keep keys out of public repos. |
+| **Internal tool** | A dashboard for your team, an ops script, an admin helper | Your colleagues, your company's data | ⚠️ Prototype yes, ship no | Auth on everything, no production write access without review, someone else reads the code. |
+| **Public app with real users** | Anything strangers sign up for | Users who trusted you with their accounts and data | ❌ Not without review | Modules 1–2 pre-launch checklist, tested access rules, secret scanning, backups. |
+| **Money, health, identity, or kids' data** | Payments, medical notes, ID verification, anything used by minors | People who may face fraud, stalking, discrimination, or legal harm | ❌ Absolutely not | All of the above, *plus* an experienced human reviewer, logging and alerting, an incident plan, and legal and compliance awareness. |
+
+**Quick self-assessment.** Answer these about your current project. Each "yes" moves you one row down the table:
+
+1. Will anyone other than me use it?
+2. Will it store anything about a person (email, name, location, photos, messages)?
+3. Can it spend money, move money, or send messages on someone's behalf?
+4. Would a leak be embarrassing, harmful, or reportable for someone other than me?
+5. Would I be in trouble (with a customer, a boss, or a regulator) if it went down for a day or lost its data?
+
+**0 yes:** vibe freely. **1–2:** vibe the prototype, then apply Modules 1–4 before real users arrive. **3+:** treat this as an engineering project that happens to use AI, not an AI project that happens to touch people.
+
+The point isn't that vibe coding is bad. The point is that **the bar rises with the stakes**, and most of the incidents in Module 1 happened because someone shipped a top-row process into a bottom-row situation.
+
+### 7. How to use AI in this course: plan → generate → read → test → verify
+
+You'll use AI on every exercise in this course. You'll just use it with a loop instead of a slot machine. Here's the five-step workflow every later module builds on:
+
+| Step | You do | The AI does | Output |
+|---|---|---|---|
+| **1. Plan** | State the goal, users, sensitive data, and constraints. Decide what "done" means. | Asks clarifying questions, proposes an approach, lists risks. | A short written plan you agree with *before* code exists. |
+| **2. Generate** | Ask for one small, well-scoped change at a time. | Writes the code. | A diff you can actually read (dozens of lines, not thousands). |
+| **3. Read** | Read the AI's summary and skim the diff for red flags (Module 3). | Explains anything you ask about, including its shortcuts. | You can explain what changed in two sentences. |
+| **4. Test** | Run it, including the unhappy paths: wrong user, bad input, logged out. | Writes tests you've checked are real (Module 4). | Tests that would fail if the feature broke. |
+| **5. Verify** | Check with evidence outside the AI: curl as a stranger, scanners, logs. | Suggests what to verify and how. | Proof, not vibes. |
+
+Then commit, and repeat. Small loops beat giant prompts: when something goes wrong in a 40-line change you can find it, and in a 4,000-line change you can't.
+
+**A planning prompt to start any feature:**
+
+```text
+I want to build: [feature].
+Users: [who]. Sensitive data involved: [what, or "none"].
+Before writing any code:
+1. Ask me up to 5 clarifying questions.
+2. Propose the simplest design that works, in plain English.
+3. List what could go wrong: security, data loss, cost, and edge cases.
+4. Break the work into small steps I can review one at a time.
+Do not write code until I approve the plan.
+```
+
+Notice what that prompt does: it gets the AI to do step 1 *with* you instead of skipping straight to step 2. The Stanford researchers found that people who gave the AI clearer specifications, and who edited and questioned its output, ended up with more secure code ([Perry et al.](https://arxiv.org/abs/2211.03622)). Planning is how you give it those specifications.
+
 ---
 
 ## What Good Looks Like: The Vibe-Coder Maturity Ladder
@@ -140,11 +195,54 @@ It won't catch everything, because the model can be confidently wrong about its 
 
 ---
 
+## Glossary: Words This Course Uses
+
+You don't need to memorize these. Come back when a module uses one and it doesn't click.
+
+| Term | Plain-English meaning |
+|---|---|
+| **Vibe coding** | Building software by describing it to an AI and accepting the output without reading or understanding it (Karpathy, Feb 2025). |
+| **Accept All** | Applying every change the AI proposes without reviewing the diff. |
+| **Diff** | The before-and-after view of what a change adds and removes in your code. |
+| **Frontend / client** | The code that runs on the user's device (browser or phone). Users can read and modify it. |
+| **Backend / server** | The code that runs on machines you control. This is where real rules must be enforced. |
+| **API** | The set of URLs your frontend (or anyone with `curl`) calls to read and change data. |
+| **Authentication (authn)** | Proving *who* someone is, such as logging in. |
+| **Authorization (authz)** | Deciding *what* that person is allowed to do, such as "only see your own invoices." |
+| **RLS (Row Level Security)** | Database rules (Postgres and Supabase) that decide which rows each user can read or change. |
+| **Security rules** | Firebase's equivalent of RLS for Firestore and Cloud Storage. |
+| **Secret / API key** | A credential that grants access to a service. Some keys are public by design; secret keys must never reach the browser. |
+| **Environment variable** | A setting (often a secret) provided to your app at runtime instead of hard-coded in the source. |
+| **Injection** | When user input gets treated as code: SQL, shell commands, HTML, or LLM instructions. |
+| **XSS** | Cross-site scripting: an attacker's JavaScript running in another user's browser. |
+| **Dependency / package** | Someone else's code your app installs (from npm, PyPI, etc.). |
+| **Hallucination** | The AI confidently stating something false, such as a package that doesn't exist or code that "is secure." |
+| **Agent** | An AI that takes actions (edits files, runs commands, calls tools) rather than just suggesting text. |
+| **MCP** | Model Context Protocol: a standard way to connect AI agents to tools and data sources (databases, GitHub, etc.). |
+| **Production (prod)** | The live system real users depend on. Its opposite is development (dev) or staging. |
+| **Threat model** | A written answer to "what are we protecting, from whom, and what could go wrong?" |
+| **Least privilege** | Giving every person, key, and agent only the minimum access it needs. |
+| **Tech debt** | Shortcuts that make today faster and every future change slower. |
+
+---
+
 ## How the Course Is Organized
 
 - **Module 0 (you are here):** the honest intro.
 - **Modules 1–2: the security deep dive.** This is the heaviest part of the course on purpose. Module 1 covers why vibe-coded apps are so often vulnerable, with real numbers and real incidents. Module 2 covers the specific vulnerabilities that get you hacked and the defenses and prompts that prevent them.
 - **Modules 3–9: the rest of engineering.** Reading code you accepted, testing, architecture, observability, data modeling, deployment, and knowing when to stop vibing.
+
+### Course roadmap
+
+Think of the course as three stages, each building on the last:
+
+| Stage | Modules | The question it answers | You'll leave with |
+|---|---|---|---|
+| **1. Stop the bleeding** | 0, 1, 2 | "Is my app leaking data or about to?" | A stranger audit, fixed access rules, a secrets scan, and a pre-launch checklist with evidence |
+| **2. Understand what you have** | 3, 4, 5 | "Do I actually know what this code does, and will I notice when it breaks?" | A diff-reading habit, real tests, and a structure the AI can't easily wreck |
+| **3. Run it like you mean it** | 6, 7, 8, 9 | "Can I operate, change, and grow this without fear?" | Logging and alerts, sane data and migrations, dev/prod separation, and a plan for tech debt |
+
+If your app already has real users, do Stage 1 *this week*, before anything else.
 
 See the full [course outline](../course-outline.md).
 
@@ -165,6 +263,10 @@ Pick one app you've built mostly with AI. If you haven't shipped one yet, use th
 
 **Scoring:** every "I don't know" counts as a "no." That's not cynicism. An attacker doesn't care whether you knew.
 
+**Part 2 (3 minutes).** Place the same app on the risk matrix from Core Concept 6. Write down its row, and the row it'll be in six months from now if it succeeds. Most people discover their "internal tool" is one sign-up page away from being a public app.
+
+**Part 3 (5 minutes).** Pick the next feature you plan to build and run the planning prompt from Core Concept 7 on it *before* generating any code. Compare the risks the AI lists with what you'd have thought of on your own.
+
 If you have more than one "no," you're the target audience, and Modules 1 and 2 are about to be very uncomfortable and very useful. Keep the list. You'll revisit it at the end of Module 2, and again at the end of the course.
 
 ---
@@ -176,6 +278,8 @@ If you have more than one "no," you're the target audience, and Modules 1 and 2 
 - **You can delegate the typing, not the responsibility.** "The AI wrote it" isn't a defense.
 - Pure Accept All is dangerous because AI code fails security tests often, users overtrust it, the model optimizes for "works," it doesn't know your threat model, and agents can take destructive actions.
 - The fix isn't to quit AI. It's **AI for speed, humans for judgment, evidence before shipping.**
+- **The bar rises with the stakes.** Prototypes can be pure vibes. Real users, money, health, identity, or kids' data cannot.
+- Use the loop on every change: **plan → generate → read → test → verify**, in small steps.
 - Start today: **read what the AI says it did**, and ask it to list its shortcuts.
 
 Next: [Module 1: Why Your Vibe-Coded App Is Probably Vulnerable →](01-security-reality.md)

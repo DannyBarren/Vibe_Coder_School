@@ -16,7 +16,7 @@ Each section follows the same pattern:
 - **A defense checklist**.
 - **Copy-paste prompt templates** that make the AI do it securely, and then make it prove it.
 
-The module ends with a **pre-launch security checklist** to run before any app touches real users.
+The module ends with four practical tools: a **test-it-like-an-attacker script** with curl commands, a **severity triage guide** for deciding what must be fixed before launch, an **AI security-review prompt pack**, and a **pre-launch security checklist** to run before any app touches real users.
 
 You don't need to memorize the code. You need to **recognize the bad pattern when the AI hands it to you**, and know what to ask for instead.
 
@@ -33,6 +33,9 @@ By the end of this module you will be able to:
 5. Find and turn off insecure defaults: wildcard CORS, debug mode, permissive rules, and missing rate limits.
 6. Verify that a dependency exists, is the one you meant, and is maintained before installing it, and lock your dependencies.
 7. Run a pre-launch security checklist and produce evidence for each item.
+8. Avoid the common authentication mistakes: weak password storage, unverified JWTs, tokens in `localStorage`, and broken reset flows.
+9. Secure "extra" features AI tools add casually: file uploads, "fetch this URL" (SSRF), payment webhooks, and profile updates (mass assignment).
+10. Test your own app like an attacker with curl, and triage findings by severity.
 
 ---
 
@@ -323,7 +326,248 @@ app.delete("/api/users/:id", requireAuth, requireRole("admin"), async (req, res)
 
 **Rule of thumb:** *the frontend decides what to show; the backend decides what's allowed.* If you deleted your whole frontend and attacked the API with `curl`, every rule should still hold.
 
-## 1.6 Defense checklist: authorization
+## 1.6 Authentication pitfalls: the login code AI gets almost right
+
+Authorization decides what you can do. **Authentication** is how the app knows who you are in the first place, and when it's wrong, every authorization check above is checking the wrong person. OWASP lists **A07 Authentication Failures** in its 2025 Top 10 ([OWASP](https://owasp.org/Top10/2025/)). If you use a managed auth provider (Supabase Auth, Firebase Auth, Clerk, Auth0, and so on), it handles much of this for you, and **that's usually the right call.** These pitfalls show up when the AI rolls its own auth, or when it glues a provider into your app incorrectly.
+
+### Pitfall 1: Storing passwords badly
+
+❌ **Bad:**
+
+```ts
+await db.user.create({ data: { email, password } });                       // plain text
+await db.user.create({ data: { email, password: md5(password) } });        // fast hash, crackable
+await db.user.create({ data: { email, password: sha256(password) } });     // still fast, still crackable
+```
+
+✅ **Good: a slow, salted password hash (Argon2id).**
+
+```ts
+import argon2 from "argon2";
+
+// OWASP's minimum recommendation for Argon2id: 19 MiB memory, 2 iterations, 1 degree of parallelism
+const passwordHash = await argon2.hash(password, {
+  type: argon2.argon2id,
+  memoryCost: 19456, // KiB = 19 MiB
+  timeCost: 2,
+  parallelism: 1,
+});
+await db.user.create({ data: { email, passwordHash } });
+
+// Login
+const ok = user && (await argon2.verify(user.passwordHash, password));
+```
+
+```python
+# Python: argon2-cffi
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+
+ph = PasswordHasher()                # sensible Argon2id defaults
+password_hash = ph.hash(password)
+
+try:
+    ph.verify(user.password_hash, password)
+except VerifyMismatchError:
+    raise InvalidCredentials()
+```
+
+The OWASP Password Storage Cheat Sheet recommends **Argon2id** (minimum 19 MiB memory, 2 iterations, parallelism 1), then scrypt, with bcrypt (work factor 10 or more) for legacy systems ([OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)). Never MD5 or SHA-anything by itself. Those are *designed* to be fast, which is exactly what a password cracker wants.
+
+### Pitfall 2: Decoding JWTs instead of verifying them
+
+A JWT (JSON Web Token) is a signed blob saying "this is user 123." The *signature* is the only thing that makes it trustworthy. AI-generated code sometimes reads the contents without checking it.
+
+❌ **Bad:**
+
+```ts
+import jwt from "jsonwebtoken";
+const payload = jwt.decode(token);   // decode() does NOT verify the signature
+req.user = { id: payload.sub };       // an attacker can write any "sub" they like
+```
+
+✅ **Good:**
+
+```ts
+const payload = jwt.verify(token, process.env.JWT_SECRET!, {
+  algorithms: ["HS256"],   // pin the algorithm you actually use
+}) as jwt.JwtPayload;      // throws if the signature, expiry, or algorithm is wrong
+req.user = { id: payload.sub };
+```
+
+If you use Supabase or Firebase, verify tokens with the provider's server SDK (for example `supabase.auth.getUser(token)` or the Firebase Admin SDK's `verifyIdToken`) rather than hand-decoding them.
+
+### Pitfall 3: Session tokens in `localStorage`
+
+❌ **Bad (for most apps):**
+
+```ts
+localStorage.setItem("token", accessToken); // any XSS on your site can read and steal it
+```
+
+✅ **Better: an HttpOnly, Secure cookie set by the server.**
+
+```ts
+res.cookie("session", sessionToken, {
+  httpOnly: true,          // JavaScript can't read it, so XSS can't steal it
+  secure: true,            // HTTPS only
+  sameSite: "lax",         // basic CSRF protection
+  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days, in milliseconds
+  path: "/",
+});
+```
+
+An HttpOnly cookie doesn't make XSS harmless (injected script can still act *as* the user while the page is open), but it stops the token from being copied and reused elsewhere. The OWASP Session Management Cheat Sheet covers cookie attributes, expiry, and rotating session IDs on login ([OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)).
+
+Also: **log out means invalidate on the server**, not just "delete the token in the browser." And give sessions an expiry.
+
+### Pitfall 4: Password reset and magic links
+
+Reset links and magic links are passwords that arrive by email. Treat them that way.
+
+❌ **Bad:**
+
+```ts
+app.post("/forgot-password", async (req, res) => {
+  const user = await db.user.findUnique({ where: { email: req.body.email } });
+  if (!user) return res.status(404).json({ error: "No account with that email" }); // account enumeration
+  const token = Math.random().toString(36).slice(2);                               // guessable
+  await db.user.update({ where: { id: user.id }, data: { resetToken: token } });   // stored raw, never expires
+  const link = `https://${req.headers.host}/reset?token=${token}`;                 // Host header is attacker-controlled
+  await sendEmail(user.email, link);
+  res.json({ ok: true });
+});
+```
+
+✅ **Good:**
+
+```ts
+import crypto from "node:crypto";
+const sha256 = (v: string) => crypto.createHash("sha256").update(v).digest("hex");
+
+app.post("/forgot-password", resetRateLimit, async (req, res) => {
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const user = await db.user.findUnique({ where: { email } });
+  if (user) {
+    const token = crypto.randomBytes(32).toString("base64url");            // unguessable
+    await db.passwordReset.create({
+      data: {
+        userId: user.id,
+        tokenHash: sha256(token),                                          // store only a hash
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000),                  // 30 minutes
+      },
+    });
+    await sendEmail(user.email, `${process.env.APP_URL}/reset?token=${token}`); // fixed base URL
+  }
+  // Same response either way, so attackers can't discover which emails have accounts
+  res.json({ message: "If that account exists, we've sent a reset link." });
+});
+
+app.post("/reset-password", resetRateLimit, async (req, res) => {
+  const record = await db.passwordReset.findFirst({
+    where: { tokenHash: sha256(String(req.body.token ?? "")), usedAt: null, expiresAt: { gt: new Date() } },
+  });
+  if (!record) return res.status(400).json({ error: "Invalid or expired link" });
+  // ...validate the new password, then:
+  await db.user.update({ where: { id: record.userId }, data: { passwordHash: await argon2.hash(req.body.password, { type: argon2.argon2id }) } });
+  await db.passwordReset.update({ where: { id: record.id }, data: { usedAt: new Date() } }); // single use
+  await db.session.deleteMany({ where: { userId: record.userId } });                         // log out everywhere
+  res.json({ ok: true });
+});
+```
+
+The OWASP Forgot Password Cheat Sheet covers the same rules: consistent responses, random single-use tokens with short expiry, and not trusting the Host header when building links ([OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html)).
+
+### Pitfall 5: Skipping email verification
+
+If your app grants access the moment someone types an email address, anyone can sign up as `ceo@yourcustomer.com`. That matters whenever you use email for anything meaningful: team invites, "users from @company.com can see company data," or sending notifications.
+
+- In Supabase, keep **"Confirm email"** enabled in your Auth settings, and don't treat unconfirmed users as members of an organization.
+- In Firebase rules, you can require `request.auth.token.email_verified == true` for sensitive paths.
+- **Never** grant access based on an email domain unless that email has been verified.
+
+### Pitfall 6: No limits on login
+
+No rate limit means unlimited password guessing. Section 3.7 shows a login rate limiter. Pair it with consistent error messages ("Invalid email or password," never "wrong password for this account") and, for anything sensitive, offer multi-factor authentication. Managed providers make MFA a settings toggle.
+
+## 1.7 Mass assignment: when "update my profile" updates your role
+
+**Mass assignment** happens when code copies *every* field from the request into the database. The user only meant to change their display name, but nothing stops them from also sending `"role": "admin"` or `"plan": "enterprise"` ([OWASP Mass Assignment Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html)). AI-generated CRUD code does this constantly, because `data: req.body` is the shortest thing that works.
+
+❌ **Bad (TypeScript / Prisma):**
+
+```ts
+// PATCH /api/me   body: { "displayName": "Leo", "role": "admin", "credits": 999999 }
+app.patch("/api/me", requireAuth, async (req, res) => {
+  const user = await db.user.update({
+    where: { id: req.user.id },   // correctly scoped to the current user...
+    data: req.body,               // ...who can now set ANY column, including role
+  });
+  res.json(user);                 // and the response may include passwordHash too
+});
+```
+
+✅ **Good: an explicit allowlist of editable fields.**
+
+```ts
+import { z } from "zod";
+
+const ProfileUpdate = z
+  .object({
+    displayName: z.string().min(1).max(50).optional(),
+    avatarUrl: z.string().url().max(500).optional(),
+  })
+  .strict(); // unknown keys like "role" cause a validation error
+
+app.patch("/api/me", requireAuth, async (req, res) => {
+  const parsed = ProfileUpdate.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
+
+  const user = await db.user.update({
+    where: { id: req.user.id },
+    data: parsed.data,
+    select: { id: true, displayName: true, avatarUrl: true }, // never return secrets
+  });
+  res.json(user);
+});
+```
+
+❌ **Bad (Supabase): the RLS policy is correct, the table design isn't.**
+
+```sql
+create table public.profiles (
+  id uuid primary key references auth.users,
+  display_name text,
+  role text default 'user',        -- authorization data in a user-editable row
+  plan text default 'free'
+);
+create policy "Users update own profile" on public.profiles
+for update to authenticated
+using ((select auth.uid()) = id) with check ((select auth.uid()) = id);
+-- The user can PATCH their own row... including role = 'admin'.
+```
+
+✅ **Good: column-level privileges, or keep roles somewhere users can't write.**
+
+```sql
+-- Option A: users may only update specific columns
+revoke update on table public.profiles from authenticated;
+grant update (display_name) on table public.profiles to authenticated;
+
+-- Option B (cleaner): roles live in a separate table with NO insert/update/delete
+-- policies for authenticated users; only server-side code (secret key) writes it.
+create table public.user_roles (
+  user_id uuid primary key references auth.users,
+  role text not null check (role in ('user', 'admin'))
+);
+alter table public.user_roles enable row level security;
+create policy "Users read own role" on public.user_roles
+for select to authenticated using ((select auth.uid()) = user_id);
+```
+
+The same rule applies to **anything the client shouldn't decide**: prices, order totals, discount amounts, `isVerified`, `ownerId`, credits, and plan tier. The server computes or looks those up. It never accepts them from the request.
+
+## 1.8 Defense checklist: authorization
 
 - [ ] Every endpoint or query that touches user data **checks identity on the server** (verified session or JWT), never from the request body or URL.
 - [ ] Every query for a user-owned record **includes ownership** (`WHERE owner_id = current_user`) or a role check.
@@ -334,8 +578,13 @@ app.delete("/api/users/:id", requireAuth, requireRole("admin"), async (req, res)
 - [ ] Views are `security_invoker` or not exposed. The **service-role / secret key** exists only on the server.
 - [ ] Admin actions are enforced **server-side** and **logged**.
 - [ ] You've **tested as the wrong user**: logged out, as User B against User A's data, and with direct API calls that skip the UI.
+- [ ] Passwords (if you store them) use **Argon2id**, scrypt, or bcrypt, never plain text or a fast hash. Better: a managed auth provider.
+- [ ] JWTs are **verified** (signature, expiry, algorithm), never just decoded. Sessions expire and are invalidated server-side on logout.
+- [ ] Reset and magic-link tokens are random, hashed at rest, short-lived, single-use, and built on a fixed base URL. Responses don't reveal whether an account exists.
+- [ ] Email is **verified** before it's used for anything that grants access.
+- [ ] Update endpoints use an **allowlist** of editable fields. Roles, prices, plans, and owner IDs can't be set from the request body.
 
-## 1.7 Prompt templates: authorization
+## 1.9 Prompt templates: authorization
 
 **When building a feature that touches data:**
 
@@ -373,6 +622,36 @@ For each table in this project:
    user A's rows.
 Output the migration SQL and the tests. Then list any table you were unsure
 about so I can decide.
+```
+
+**For login, signup, and reset flows:**
+
+```text
+Review the authentication code in this project as an attacker would.
+Check specifically:
+- How passwords are stored (must be Argon2id/scrypt/bcrypt, or a managed provider).
+- Whether every JWT/session is VERIFIED server-side (signature, expiry, algorithm),
+  not just decoded.
+- Where tokens live in the browser (localStorage vs HttpOnly cookies) and why.
+- Password reset / magic links: token randomness, expiry, single use, hashed
+  storage, base URL source (never the Host header), and account enumeration.
+- Whether email must be verified before it grants anything.
+- Rate limits on login, signup, reset, and verification endpoints.
+For each problem: file:line, attack in one sentence, fix. If we use a managed
+auth provider, tell me which of these it already handles and which are still
+on us.
+```
+
+**For update endpoints (mass assignment):**
+
+```text
+Find every create/update endpoint or Supabase table write in this project.
+For each, list which fields the client can set. Flag any that accept the
+whole request body (data: req.body, **request.json, spread operators) or that
+let the client set role, permissions, owner/user IDs, prices, totals, credits,
+plan, or verification flags. Rewrite each with an explicit allowlist schema
+(zod/pydantic .strict()) and, for Supabase, column-level grants or a separate
+roles table.
 ```
 
 **Audit what you already have:**
@@ -854,6 +1133,30 @@ const loginRateLimit = rateLimit({
 app.post("/login", loginRateLimit, loginHandler);
 ```
 
+Two details AI-generated rate limiters often get wrong:
+
+- **Behind a proxy or load balancer** (Vercel, Render, Heroku, Fly, Cloudflare, nginx), every request may appear to come from the proxy's IP, so one user can lock out everyone, or the limiter does nothing. In Express, tell it how many proxies to trust (`app.set("trust proxy", 1)` for a single proxy hop), and check your host's documentation for the correct value.
+- **Limit by account as well as IP** for logged-in actions, especially costly ones like LLM calls. Attackers rotate IPs cheaply.
+
+✅ **Python (FastAPI + `slowapi`):**
+
+```python
+from fastapi import FastAPI, Request
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
+app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+@app.post("/login")
+@limiter.limit("10/minute")
+async def login(request: Request):   # slowapi needs the `request` parameter
+    ...
+```
+
 Also set **spending caps** at your LLM, SMS, and email providers. That's a rate limit on your wallet.
 
 **Other common insecure defaults to hunt for:**
@@ -866,7 +1169,223 @@ Also set **spending caps** at your LLM, SMS, and email providers. That's a rate 
 - Supabase or Firebase "test mode" rules, and public storage buckets (Part 1).
 - Admin panels or API docs (`/admin`, `/docs`, `/graphql` introspection) exposed publicly.
 
-## 3.8 Defense checklist: injection and defaults
+## 3.8 SSRF: "fetch this URL for me"
+
+**Server-Side Request Forgery (SSRF)** happens when your server fetches a URL the user supplies, and the user points it somewhere only your server can reach: `localhost`, your internal network, or the cloud **metadata service** that hands out credentials. AI tools add "fetch a URL" features casually: link previews, "import from URL," webhooks you call out to, PDF-from-web-page, and "let the AI browse this page."
+
+**Why it matters:** in the 2019 Capital One breach (about 100 million people in the US and 6 million in Canada), an attacker got through a misconfigured web application firewall and obtained temporary credentials from the AWS EC2 metadata service at `169.254.169.254`. Those credentials belonged to a role with access to S3 data ([Capital One](https://www.capitalone.com/digital/facts2019/), [ACM analysis](https://dl.acm.org/doi/10.1145/3546068)). AWS told Senator Wyden it believed an SSRF attack was used once the attacker got in through the misconfigured firewall ([AWS letter](https://www.wyden.senate.gov/imo/media/doc/081319%20Amazon%20Letter%20to%20Sen%20Wyden%20RE%20Consumer%20Data.pdf)). The lesson: **"make the server fetch this" can mean "make the server fetch its own keys."**
+
+❌ **Bad:**
+
+```ts
+// POST /api/preview   body: { "url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/" }
+app.post("/api/preview", async (req, res) => {
+  const r = await fetch(req.body.url);   // fetches ANYTHING the server can reach
+  res.send(await r.text());              // ...and hands the response to the attacker
+});
+```
+
+✅ **Better: validate scheme, resolve the host, block private ranges, no redirects, timeouts, size limits.**
+
+```ts
+import dns from "node:dns/promises";
+import ipaddr from "ipaddr.js";
+
+async function assertPublicHttpUrl(raw: string): Promise<URL> {
+  const url = new URL(raw);                                  // throws on garbage
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only http(s) allowed");
+  if (url.username || url.password) throw new Error("No credentials in URLs");
+
+  const addrs = await dns.lookup(url.hostname, { all: true });
+  for (const { address } of addrs) {
+    const ip = ipaddr.process(address);                      // normalizes IPv4-mapped IPv6
+    if (ip.range() !== "unicast") {                          // blocks private, loopback, link-local, etc.
+      throw new Error("Destination not allowed");
+    }
+  }
+  return url;
+}
+
+app.post("/api/preview", requireAuth, previewRateLimit, async (req, res) => {
+  let url: URL;
+  try { url = await assertPublicHttpUrl(String(req.body.url)); }
+  catch { return res.status(400).json({ error: "URL not allowed" }); }
+
+  const r = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(5000) });
+  if (r.status >= 300 && r.status < 400) return res.status(400).json({ error: "Redirects not followed" });
+  const text = (await r.text()).slice(0, 100_000);           // cap what you process
+  res.json({ title: extractTitle(text) });                   // return only what you need, never raw responses
+});
+```
+
+Honest caveat: a check-then-fetch like this can still be beaten by **DNS rebinding** (the hostname resolves to a public IP during the check and a private one during the fetch). For high-risk features, route outbound fetches through an egress proxy that enforces the block, or pin the connection to the IP you validated. Also:
+
+- **Allowlist** destinations when you can ("only fetch from `api.github.com`") instead of blocklisting.
+- On AWS, require **IMDSv2** on EC2 instances, which requires a session token for metadata requests ([AWS docs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html)), and give instance roles least privilege.
+- Never return the raw fetched response to the user.
+
+See the OWASP SSRF Prevention Cheat Sheet for more ([OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)).
+
+## 3.9 File uploads
+
+"Let users upload a profile picture" sounds harmless. Unchecked, it means: files of any size (fill your disk, run up your bill), files of any type (an `.html` file served from your domain is stored XSS), original filenames used as paths (`../../`), and public URLs for private documents (Tea's verification selfies).
+
+❌ **Bad (Express + multer):**
+
+```ts
+import multer from "multer";
+const upload = multer({ dest: "public/uploads/" });    // served publicly, no limits
+
+app.post("/api/upload", upload.single("file"), (req, res) => {
+  // Trusts the browser-supplied filename and MIME type; any size, any type
+  res.json({ url: `/uploads/${req.file!.originalname}` });
+});
+```
+
+✅ **Good: limits, real type checks, re-encoding, random names, private storage.**
+
+```ts
+import multer from "multer";
+import sharp from "sharp";
+import crypto from "node:crypto";
+import { fileTypeFromBuffer } from "file-type";
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },     // 5 MB, one file
+});
+const ALLOWED = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+app.post("/api/avatar", requireAuth, uploadRateLimit, upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file" });
+
+  const type = await fileTypeFromBuffer(req.file.buffer); // checks the actual bytes, not the extension
+  if (!type || !ALLOWED.has(type.mime)) return res.status(415).json({ error: "Unsupported file type" });
+
+  const clean = await sharp(req.file.buffer)               // re-encode: drops metadata (e.g., GPS) and junk
+    .rotate()
+    .resize(512, 512, { fit: "cover" })
+    .webp()
+    .toBuffer();
+
+  const key = `avatars/${req.user.id}/${crypto.randomUUID()}.webp`; // never the user's filename
+  await storage.putPrivate(key, clean, "image/webp");             // your helper: private bucket
+  res.json({ key });                                              // serve later via short-lived signed URL
+});
+```
+
+Upload rules of thumb (see the OWASP File Upload Cheat Sheet: [OWASP](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html)):
+
+- **Limit size and count**, on the server and in storage rules (section 1.4 shows a Firebase Storage size and type rule).
+- **Check the real file type** from its bytes, and allowlist types.
+- **Generate your own filenames.** Never use the uploaded name in a path.
+- **Store privately** and serve through signed URLs, ideally from a separate domain or with `Content-Disposition: attachment` for non-images.
+- **Re-encode images.** It removes metadata such as GPS location and neutralizes many malformed-file tricks.
+- For documents from untrusted users, consider malware scanning.
+
+## 3.10 Webhook signature verification (Stripe and friends)
+
+A webhook is a third party (Stripe, GitHub, Clerk, Twilio) calling *your* endpoint to say "this happened." If you don't verify that the call actually came from them, **anyone can POST "payment succeeded" to your webhook URL** and get the product for free.
+
+❌ **Bad:**
+
+```ts
+app.post("/webhooks/stripe", express.json(), async (req, res) => {
+  const event = req.body;                                   // anyone can send this JSON
+  if (event.type === "checkout.session.completed") {
+    await markOrderPaid(event.data.object.metadata.orderId); // free stuff for everyone
+  }
+  res.sendStatus(200);
+});
+```
+
+✅ **Good: verify the signature against the raw body, and handle retries idempotently.**
+
+```ts
+import Stripe from "stripe";
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+
+// Must receive the RAW body: register this route BEFORE any global express.json()
+app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+  let event: Stripe.Event;
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,                                   // raw Buffer, not parsed JSON
+      req.headers["stripe-signature"] as string,
+      process.env.STRIPE_WEBHOOK_SECRET!          // whsec_... from the Stripe dashboard
+    );
+  } catch {
+    return res.status(400).send("Invalid signature");
+  }
+
+  if (await alreadyProcessed(event.id)) return res.sendStatus(200); // Stripe may retry deliveries
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object as Stripe.Checkout.Session;
+    await fulfillOrder(session.id);              // look up amounts from Stripe/your DB, not from metadata alone
+  }
+  await markProcessed(event.id);
+  res.sendStatus(200);
+});
+```
+
+In a Next.js route handler, read the raw body with `await req.text()` and pass that string to `constructEvent`. Stripe's documentation says to call `constructEvent()` with the **raw request body**, the `Stripe-Signature` header, and your endpoint secret ([Stripe docs](https://docs.stripe.com/webhooks/signature)). The most common AI bug here is parsing the JSON first, which breaks verification, and then "fixing" that by removing the verification.
+
+Every serious webhook provider has an equivalent signature scheme. Use it.
+
+## 3.11 Security headers and Content-Security-Policy
+
+Security headers are instructions your server sends to the browser: "don't let other sites frame me," "don't guess file types," "only run scripts from these places." They're cheap, and they turn some bugs (like XSS) from catastrophic into contained.
+
+❌ **Bad:** no headers at all, which is the default for many AI-generated Express, Flask, and static setups.
+
+✅ **Good (Express with `helmet`):**
+
+```js
+import helmet from "helmet";
+
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],                                 // no inline scripts, no random CDNs
+        connectSrc: ["'self'", "https://YOUR-PROJECT.supabase.co"],
+        imgSrc: ["'self'", "data:", "https:"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],                            // can't be framed (clickjacking)
+      },
+    },
+  })
+);
+```
+
+✅ **Good (Next.js, `next.config.js`):**
+
+```js
+const securityHeaders = [
+  { key: "Content-Security-Policy", value: "default-src 'self'; object-src 'none'; frame-ancestors 'none'" },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+  { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" },
+];
+
+module.exports = {
+  async headers() {
+    return [{ source: "/:path*", headers: securityHeaders }];
+  },
+};
+```
+
+Practical advice:
+
+- **Start with `Content-Security-Policy-Report-Only`** to see what would break, then enforce. A strict CSP often needs tuning for analytics, fonts, and payment widgets. Next.js apps in particular may need nonces for inline scripts, so check the framework's CSP guide before enforcing.
+- **Don't "fix" CSP errors by adding `'unsafe-inline'` and `*` everywhere.** That's the CSP version of `cors()` with a wildcard.
+- Check your deployed site's headers with `curl -sI https://yourapp.com` or a scanner such as [securityheaders.com](https://securityheaders.com/).
+
+References: [MDN, Content Security Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP) and the [OWASP HTTP Headers Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html).
+
+## 3.12 Defense checklist: injection and defaults
 
 - [ ] **All** database queries are parameterized or use an ORM's safe API, with no string-built SQL and allowlists for dynamic identifiers.
 - [ ] All request input is **validated with a schema** (type, length, format) at the boundary.
@@ -877,9 +1396,13 @@ Also set **spending caps** at your LLM, SMS, and email providers. That's a rate 
 - [ ] Debug mode is **off** in production, `ALLOWED_HOSTS` and the equivalent are set, and no stack traces reach users.
 - [ ] **Rate limits** on auth endpoints and anything that costs money, plus provider spending caps.
 - [ ] Cookies are `HttpOnly`, `Secure`, and `SameSite`, and security headers are present.
-- [ ] Uploads are limited by size and type and stored privately.
+- [ ] Uploads are limited by size and type, checked by content, renamed, re-encoded (images), and stored privately.
+- [ ] Any "fetch a URL" feature blocks private, loopback, and metadata addresses, doesn't follow redirects, and has timeouts (or uses an allowlist).
+- [ ] Every webhook endpoint **verifies the provider's signature** on the raw body and handles retries idempotently.
+- [ ] Security headers are set (CSP, `nosniff`, HSTS, `frame-ancestors`), verified with `curl -sI`.
+- [ ] Rate limiters know about your proxy setup, and costly actions are limited per account.
 
-## 3.9 Prompt templates: injection and defaults
+## 3.13 Prompt templates: injection and defaults
 
 ```text
 Security requirements for all code in this session:
@@ -913,6 +1436,17 @@ instructions (prompt injection). Requirements:
   code/SQL or render it as raw HTML.
 Explain the worst thing an attacker could make this feature do, and how the
 design limits it.
+```
+
+```text
+Review these specific features for security: every "fetch a URL" feature
+(SSRF), every file upload, and every incoming webhook. For each, show the
+current code, the attack in one sentence (e.g., "fetch the cloud metadata
+URL," "upload an HTML file and get stored XSS," "POST a fake
+payment_succeeded event"), and the fixed code: private-IP blocking and no
+redirects for fetches; size/type/content checks, random names, and private
+storage for uploads; raw-body signature verification and idempotency for
+webhooks.
 ```
 
 ```text
@@ -1035,7 +1569,233 @@ anything uncertain as "VERIFY MANUALLY."
 
 ---
 
-# Part 5: The Pre-Launch Security Checklist
+# Part 5: Test It Like an Attacker (Manual Test Script)
+
+Scanners and AI reviews are useful, but nothing beats sending the requests an attacker would send and seeing what comes back. This script takes 30–60 minutes. **Only run it against apps you own or have written permission to test.**
+
+### Setup
+
+Create two normal test accounts (A and B) and, if you have roles, one admin. Then set variables in your terminal:
+
+```bash
+export APP="https://yourapp.example"            # your deployed frontend/API
+export SB="https://YOUR-PROJECT.supabase.co"    # if you use Supabase
+export ANON="your-anon-or-publishable-key"      # public by design
+export A_TOKEN="user A's access token"          # from the browser's Network tab, Authorization header
+export B_TOKEN="user B's access token"
+export A_ID="user A's id"; export B_ID="user B's id"
+export B_RECORD="id of a record that belongs to B"
+```
+
+### Test 1: Logged-out data access
+```bash
+# Expect: [] or a 401/403, never real rows
+curl -s "$SB/rest/v1/profiles?select=*" -H "apikey: $ANON"
+curl -s "$SB/rest/v1/orders?select=*&limit=5" -H "apikey: $ANON"
+curl -s -o /dev/null -w "%{http_code}\n" "$APP/api/invoices/1"   # expect 401
+```
+Repeat for **every** table and endpoint that holds user data.
+
+### Test 2: Cross-user access (IDOR)
+```bash
+# As A, try to read, change, and delete B's record. Expect 404/403 or [] and NO change.
+curl -s "$APP/api/invoices/$B_RECORD" -H "Authorization: Bearer $A_TOKEN"
+curl -s "$SB/rest/v1/notes?id=eq.$B_RECORD&select=*" -H "apikey: $ANON" -H "Authorization: Bearer $A_TOKEN"
+curl -s -X PATCH "$SB/rest/v1/notes?id=eq.$B_RECORD" -H "apikey: $ANON" \
+  -H "Authorization: Bearer $A_TOKEN" -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" -d '{"body":"pwned"}'          # expect []
+# Then confirm, as B, that B's record is unchanged.
+```
+
+### Test 3: Mass assignment and privilege escalation
+```bash
+# Try to make yourself admin or change fields you shouldn't control. Expect 400/403, or the field ignored.
+curl -s -X PATCH "$APP/api/me" -H "Authorization: Bearer $A_TOKEN" \
+  -H "Content-Type: application/json" -d '{"displayName":"A","role":"admin","credits":999999}'
+curl -s -X PATCH "$SB/rest/v1/profiles?id=eq.$A_ID" -H "apikey: $ANON" \
+  -H "Authorization: Bearer $A_TOKEN" -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" -d '{"role":"admin"}'
+# And call an admin-only endpoint as a normal user. Expect 403.
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$APP/api/users/$B_ID" -H "Authorization: Bearer $A_TOKEN"
+```
+
+### Test 4: Storage
+```bash
+# Paste a file URL from your app into a logged-out request. Expect 400/403 for private files.
+curl -s -o /dev/null -w "%{http_code}\n" "PASTE_A_PRIVATE_FILE_URL_HERE"
+# Supabase: try listing a bucket anonymously. Expect an error or an empty list.
+curl -s -X POST "$SB/storage/v1/object/list/user-files" -H "apikey: $ANON" \
+  -H "Content-Type: application/json" -d '{"prefix":""}'
+```
+
+### Test 5: Secrets in the bundle
+```bash
+# Download your frontend's JavaScript and look for secret-looking strings
+for js in $(curl -s "$APP" | grep -oE 'src="[^"]+\.js"' | cut -d'"' -f2); do
+  case "$js" in http*) url="$js" ;; *) url="$APP$js" ;; esac
+  curl -s "$url" | grep -oE '(sk_live_[A-Za-z0-9]+|sk-[A-Za-z0-9_-]{20,}|service_role|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)' | sort -u
+done
+```
+A JWT-looking string (`eyJ...`) is often just the public anon key. Decode its middle (payload) section with an offline JWT decoder, since you shouldn't paste keys into random websites, and check that the role is `anon`, not `service_role`. This grep only catches common shapes, so also run `gitleaks dir` on your build output (section 2.6).
+
+### Test 6: CORS, headers, and debug output
+```bash
+# CORS: does the API grant credentials to an arbitrary origin? You should NOT see
+# "Access-Control-Allow-Origin: https://evil.example" together with "Allow-Credentials: true".
+curl -s -I "$APP/api/me" -H "Origin: https://evil.example" | grep -i "access-control"
+
+# Security headers present?
+curl -s -I "$APP" | grep -iE "content-security-policy|strict-transport|x-content-type|frame"
+
+# Errors: expect a generic message, no stack traces, file paths, or SQL
+curl -s "$APP/api/does-not-exist"
+curl -s -X POST "$APP/api/login" -H "Content-Type: application/json" -d '{"email":{"$ne":null},"password":{"$ne":null}}'
+```
+
+### Test 7: Rate limits
+```bash
+# Expect 429s to appear well before 30 attempts
+for i in $(seq 1 30); do
+  curl -s -o /dev/null -w "%{http_code} " -X POST "$APP/api/login" \
+    -H "Content-Type: application/json" -d '{"email":"a@example.com","password":"wrong"}'
+done; echo
+```
+
+### Test 8: Webhooks, SSRF, and uploads (if you have them)
+```bash
+# Forged webhook: expect 400 "Invalid signature" and NO order marked paid
+curl -s -X POST "$APP/webhooks/stripe" -H "Content-Type: application/json" \
+  -d '{"type":"checkout.session.completed","data":{"object":{"id":"cs_fake"}}}'
+
+# SSRF: expect the request to be refused
+curl -s -X POST "$APP/api/preview" -H "Authorization: Bearer $A_TOKEN" \
+  -H "Content-Type: application/json" -d '{"url":"http://169.254.169.254/latest/meta-data/"}'
+curl -s -X POST "$APP/api/preview" -H "Authorization: Bearer $A_TOKEN" \
+  -H "Content-Type: application/json" -d '{"url":"http://localhost:5432"}'
+
+# Upload: an HTML file renamed to .png should be rejected (415/400)
+printf '<script>alert(1)</script>' > evil.png
+curl -s -X POST "$APP/api/avatar" -H "Authorization: Bearer $A_TOKEN" -F "file=@evil.png"
+```
+
+**Record the results** in a simple table: test, expected, actual, pass/fail, and a link to the fix. Then rerun the whole script after every significant AI-driven change. Better still, turn the most important checks into automated tests ([Module 4](04-testing.md)).
+
+---
+
+# Part 6: Severity Triage: What to Fix Before Launch vs. After
+
+You'll find more problems than you can fix in a day. That's normal. Triage decides the order. For each finding, ask four questions:
+
+1. **Who can exploit it?** Anyone on the internet, any signed-up user, or only an admin or insider?
+2. **What do they get?** Everyone's data, one user's data, money, or just an annoyance?
+3. **Read or write?** Can they only see data, or also change and delete it?
+4. **How easy is it?** A browser and curl, or real skill and luck?
+
+| Severity | Definition | Examples | When to fix |
+|---|---|---|---|
+| **P0: Stop-ship** | Anyone, little or no skill, gets bulk access to sensitive data, money, or admin powers | Tables readable or writable without login; `service_role` or Stripe secret key in the bundle; Firebase `if true` rules on user data; unsigned payment webhooks; agent with production write access | **Before launch. If already live: now**, including rotating keys and taking the feature offline if needed |
+| **P1: Must fix before real users** | Any signed-in user can reach other users' data or escalate privileges, or there's a cheap path to large cost | IDOR on records; mass assignment of `role`; admin checks only in the UI; unverified JWTs; no rate limit on paid LLM endpoints; SSRF to internal addresses | Before real users or real data. If live, within days |
+| **P2: Fix soon** | Requires extra conditions, limited impact, or weakens defense in depth | Missing CSP and security headers; tokens in `localStorage`; verbose errors; reset tokens that don't expire; unpinned dependencies; no login rate limit with strong passwords enforced | Within weeks; schedule it |
+| **P3: Hardening** | Best practice, low direct risk | Tightening an already-safe CORS list; adding MFA for low-risk apps; cleaning up unused dependencies | Backlog; do it when you touch that code |
+
+Rules of thumb:
+
+- **Exposure beats elegance.** A boring missing RLS policy outranks a clever theoretical attack.
+- **If you're not sure whether it's exploitable, treat it one level higher** until you've verified it isn't.
+- **A leaked secret is P0 regardless of where it leaked.** Rotate first and investigate second.
+- **Write-access bugs outrank read-only bugs** of the same scope, because they let attackers destroy data or plant malicious content (Moltbook's open posts are an example).
+- Industry tools such as CVSS ([FIRST](https://www.first.org/cvss/)) formalize the same questions if you ever need a standard score. Lovable's CVE scored 8.26 (High).
+
+---
+
+# Part 7: The AI Security-Review Prompt Pack
+
+The prompts throughout this module target single topics. These are general-purpose reviews to run at key moments. Rules for using them:
+
+- **Give the AI the real code**, not your description of it.
+- **Ask for evidence** (file and line) and an explicit "CANNOT VERIFY" option, so it doesn't invent reassurance.
+- **Verify every claimed fix** with Part 5's tests. The AI reviewing code has the same blind spots as the AI that wrote it (Module 1, Part 3).
+- When stakes are high, get a **second opinion from a different model or tool**, and above all from a human who knows security.
+
+**Prompt 1: Review a diff before you accept it**
+
+```text
+Review this diff for security problems only (ignore style). For each changed
+endpoint, query, policy, or config: who can call it (anon / any user / owner /
+admin), what input it trusts, and what an attacker could do with it. Flag:
+missing auth or ownership checks, client-controlled roles/prices/IDs, raw SQL or
+shell, unsanitized HTML, secrets, new dependencies, CORS/debug changes, and
+anything with "dangerously," "unsafe," "skip," "disable," or "TODO" in it.
+Severity-rank each finding P0-P3. If the diff is safe, say why, citing lines.
+```
+
+**Prompt 2: Map the attack surface**
+
+```text
+List every way data enters or leaves this application: HTTP routes, server
+actions, database tables reachable from the client, storage buckets, webhooks,
+cron jobs, third-party API calls, and AI/LLM tool calls. For each entry point
+give: authentication required (yes/no/how), authorization rule, input
+validation, and the file:line where each is enforced. Mark any column you
+cannot determine as UNKNOWN.
+```
+
+**Prompt 3: Red-team as a specific attacker**
+
+```text
+Pretend you are [a curious user with dev tools / a competitor scraping data /
+an ex-partner trying to find someone's address / a bot farm abusing the free
+tier]. Using only what's visible in this code, describe your three most
+promising attacks step by step, what you'd get, and what single change would
+stop each one.
+```
+
+**Prompt 4: Review database access rules**
+
+```text
+Here are my Supabase RLS policies / Firebase rules and my table schemas.
+For every table/collection and every operation (select/insert/update/delete),
+state exactly who is allowed: anon, any authenticated user, the owner, or an
+admin. Flag tables without RLS, `using (true)`, missing `with check`, rules
+that only check `request.auth != null`, user-editable role columns, views
+without security_invoker, and anything relying on user_metadata. Then write
+pgTAP or emulator tests that prove the intended rules.
+```
+
+**Prompt 5: Review an LLM or agent feature**
+
+```text
+This feature sends [user input / documents / web content] to an LLM that can
+[list tools]. Assume the content contains hostile instructions. What is the
+worst outcome? Check: tool permissions enforced in code and scoped to the
+current user, human approval for consequential actions, secrets or other
+users' data in context, output validation, and whether the session combines
+private data + untrusted content + an outbound channel. Propose the
+least-privilege redesign.
+```
+
+**Prompt 6: Verify a fix actually fixed it**
+
+```text
+I fixed [vulnerability] with this change: [diff]. 1) Explain how the original
+attack worked. 2) Explain precisely why this change stops it, or why it
+doesn't. 3) List bypasses I should try (other endpoints, other HTTP methods,
+other tables, the same bug elsewhere in the codebase). 4) Give me the curl
+commands or automated tests that prove the fix, including the negative case.
+```
+
+**Prompt 7: Pre-launch go/no-go**
+
+```text
+Using the pre-launch checklist (pasted below) and this codebase, produce
+a go/no-go report. For each item: PASS (with evidence), FAIL (with
+file:line and fix), or NEEDS MANUAL VERIFICATION (with the exact test to run).
+Any P0 or P1 FAIL means NO-GO. Be adversarial and do not round up.
+```
+
+---
+
+# Part 8: The Pre-Launch Security Checklist
 
 Run this before **any** app touches real users, real data, or real money, and again after any big AI-driven change. Each item needs **evidence**: a test result, a command output, a screenshot, a link. "The AI said it's fine" isn't evidence.
 
@@ -1045,6 +1805,13 @@ Run this before **any** app touches real users, real data, or real money, and ag
 - [ ] RLS is enabled on every exposed Supabase table, with **no unintended `using (true)`**. Firebase rules have **no `if true`**. *(Evidence: the policy listing and passing tests.)*
 - [ ] Admin and privileged actions are enforced **server-side**, with roles from server-controlled data.
 - [ ] Storage buckets are private, and uploaded files aren't reachable without authorization.
+- [ ] Update endpoints reject `role`, price, plan, and owner fields from the client (mass-assignment test passed).
+
+### Authentication
+- [ ] Managed auth provider, or passwords hashed with Argon2id, scrypt, or bcrypt.
+- [ ] JWTs and sessions are verified server-side, expire, and are invalidated on logout. No tokens in `localStorage` for sensitive apps.
+- [ ] Reset and magic links are random, short-lived, single-use, and use a fixed base URL. No account enumeration.
+- [ ] Email is verified before it grants access to anything.
 
 ### Secrets
 - [ ] No secret keys in the frontend bundle. *(Evidence: a secret scan of the build output.)*
@@ -1057,12 +1824,16 @@ Run this before **any** app touches real users, real data, or real money, and ag
 - [ ] No shell commands built from user input.
 - [ ] User content is rendered as text or sanitized, and a CSP header is present.
 - [ ] LLM features: least-privilege tools, human approval for consequential actions, no secrets in prompts.
+- [ ] "Fetch a URL" features block internal and metadata addresses (SSRF test passed).
+- [ ] Uploads: size, type (by content), random names, private storage (upload test passed).
+- [ ] Every webhook verifies signatures on the raw body (forged-webhook test passed).
 
 ### Configuration
 - [ ] Debug mode is off, and production errors don't leak stack traces or config.
 - [ ] CORS is an explicit allowlist.
 - [ ] Rate limits on login, signup, password reset, and paid-API endpoints.
 - [ ] Cookies are `HttpOnly`, `Secure`, and `SameSite`. HTTPS is enforced.
+- [ ] Security headers present, including a CSP (at least in report-only mode), checked with `curl -sI`.
 - [ ] No default, test, or seed accounts in production. Admin, docs, and introspection endpoints aren't public.
 
 ### Dependencies
@@ -1071,6 +1842,9 @@ Run this before **any** app touches real users, real data, or real money, and ag
 
 ### Agents and operations
 - [ ] AI agents have **no production credentials**. Destructive commands require approval.
+- [ ] MCP servers and agent tokens are least-privilege, and no agent session combines private data, untrusted input, and an outbound channel (Module 1, Part 5).
+- [ ] Part 5's attacker test script has been run against the deployed app, with results recorded.
+- [ ] Every finding is triaged (Part 6), and there are **zero open P0 or P1 issues**.
 - [ ] Automated backups exist, and **a restore has been tested.**
 - [ ] You can see auth failures and errors in logs (more in [Module 6](06-observability.md)).
 - [ ] You have a one-page plan: who to contact, how to rotate keys, how to take the app offline, and how to notify users if data leaks.
@@ -1110,12 +1884,17 @@ Use your own app, or spin up a throwaway Supabase or Firebase project with a `no
 
 **Part B: Fix it (20 min)**
 1. Apply the "good" RLS migration from section 1.3, with RLS on, revoked grants, four policies, and `with check`.
-2. Use the Supabase prompt template from section 1.7 to have your AI generate pgTAP tests, then **read them** and confirm they test denial as `anon` and as user B.
+2. Use the Supabase prompt template from section 1.9 to have your AI generate pgTAP tests, then **read them** and confirm they test denial as `anon` and as user B.
 
 **Part C: Prove it (10 min)**
 1. Rerun the curl calls from Part A. Logged-out should return `[]` or a permission error. A's token should return **only A's** note.
 2. Run `supabase test db` (or your Firebase emulator tests) and save the output.
 3. Run `gitleaks git -v` on your repo and `npm audit` or `pip-audit`. Save the output.
+
+**Part D: Attack the rest (30 min, optional but recommended)**
+1. Run Tests 3, 5, 6, and 7 from Part 5 against your app.
+2. Triage everything you found with Part 6's table. Write the P-level next to each finding.
+3. Fix every P0 now. Schedule the P1s before your next launch or marketing push.
 
 **Write-up (keep it with your project):** what was exposed before, what you changed, and the evidence that it's fixed. Then go back to your Module 0 honesty check and Module 1 stranger audit, and see how many "no" answers you can now change to "yes."
 
@@ -1128,6 +1907,10 @@ Use your own app, or spin up a throwaway Supabase or Firebase project with a `no
 - **Know public keys from secret keys.** Public keys are only safe behind correct rules. Secret keys never touch the browser or git. If one leaks, **rotate first**, clean up second, and scan continuously.
 - **Untrusted input is data, never code.** Parameterize queries, validate with schemas, avoid shells, render text not HTML, and give LLMs least privilege and human approval, because a prompt instruction isn't a control.
 - **Turn off dev-mode defaults:** wildcard CORS, debug mode, test-mode rules, and missing rate limits.
+- **Authentication has its own traps:** hash passwords with Argon2id (or use a managed provider), verify JWTs rather than decode them, keep tokens out of `localStorage`, and make reset links random, short-lived, and single-use.
+- **Never let the client decide** roles, prices, plans, or owners. Allowlist editable fields to stop mass assignment.
+- **The "small" features are attack surface:** "fetch this URL" (SSRF), uploads, and webhooks each need specific defenses. An unsigned webhook is a free-money button.
+- **Test like an attacker, triage like an adult:** run the curl script, fix every P0 and P1 before launch, and schedule the rest.
 - **Verify every package exists and is legitimate before installing.** Hallucinated packages are common, and slopsquatters are waiting. Lock and audit dependencies.
 - **Make the AI do the secure thing explicitly, then verify it yourself.** The prompts in this module raise the floor. The tests, scans, and curl calls are what prove it.
 - **Evidence or it didn't happen.** Run the pre-launch checklist before real users arrive.
@@ -1154,6 +1937,20 @@ Next: [Module 3: Reading the Code You Accepted →](03-reading-code.md)
 - Moltbook (Wiz): [blog](https://www.wiz.io/blog/exposed-moltbook-database-reveals-millions-of-api-keys)
 - Base44 (Wiz): [blog](https://www.wiz.io/blog/critical-vulnerability-base44)
 - Tea app (404 Media via Engadget): [article](https://www.engadget.com/cybersecurity/tea-app-suffers-breach-exposing-thousands-of-user-images-190731414.html) · [BBC](https://www.bbc.com/news/articles/c7vl57n74pqo)
+
+**Added in the expansion (authentication, SSRF, uploads, webhooks, headers, triage)**
+- OWASP Password Storage Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+- OWASP Session Management Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+- OWASP Forgot Password Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html)
+- OWASP Mass Assignment Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html)
+- OWASP SSRF Prevention Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)
+- OWASP File Upload Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html)
+- OWASP HTTP Headers Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)
+- Capital One, 2019 cyber incident facts: [capitalone.com](https://www.capitalone.com/digital/facts2019/) · ACM TOPS analysis: [dl.acm.org](https://dl.acm.org/doi/10.1145/3546068) · AWS letter to Sen. Wyden: [PDF](https://www.wyden.senate.gov/imo/media/doc/081319%20Amazon%20Letter%20to%20Sen%20Wyden%20RE%20Consumer%20Data.pdf)
+- AWS, configuring the instance metadata service (IMDSv2): [docs.aws.amazon.com](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html)
+- Stripe, webhook signature verification: [docs.stripe.com](https://docs.stripe.com/webhooks/signature)
+- MDN, Content Security Policy: [developer.mozilla.org](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP) · securityheaders.com: [scanner](https://securityheaders.com/)
+- FIRST, Common Vulnerability Scoring System: [first.org/cvss](https://www.first.org/cvss/)
 
 **Official documentation and tools**
 - Supabase, Row Level Security: [docs](https://supabase.com/docs/guides/database/postgres/row-level-security) · Storage access control: [docs](https://supabase.com/docs/guides/storage/security/access-control)

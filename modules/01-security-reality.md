@@ -19,6 +19,10 @@ By the end of this module you will be able to:
 3. Explain seven structural reasons AI-generated code tends to be insecure, so you can predict where *your* app is weak.
 4. Explain why "it works" and "it's secure" are different properties that need different evidence.
 5. Run a 30-minute exposure audit on your own app, acting as a logged-out stranger.
+6. Translate each OWASP Top 10:2025 category into what it looks like in a vibe-coded app.
+7. Walk through a real incident's timeline and identify the single control that would have stopped it.
+8. Explain why AI agents and MCP servers are part of your attack surface, and lock them down.
+9. Fill in a plain-language threat-model worksheet (STRIDE-lite) for your own app.
 
 ---
 
@@ -119,6 +123,25 @@ The **OWASP Top 10:2025**, the standard reference for web application risk, puts
 
 Hold that list next to the incidents below. Missing row-level security is broken access control. Public storage buckets and debug mode are misconfiguration. Hallucinated packages are a supply-chain failure. Unparameterized queries are injection. **Vibe-coded apps don't invent new vulnerabilities. They mass-produce the old ones.**
 
+### 1.7 The OWASP Top 10:2025, translated for vibe coders
+
+OWASP's category names are written for security professionals. Here's what each one usually looks like in an AI-built app, and where this course deals with it. (The category list is OWASP's; the "how it shows up" column is this course's summary of the patterns in Modules 1 and 2.)
+
+| OWASP 2025 category | How it typically shows up in a vibe-coded app | Where we fix it |
+|---|---|---|
+| **A01 Broken Access Control** | Supabase tables without RLS or with `using (true)`; Firebase rules set to `if true`; `/api/invoices/:id` with no ownership check; admin buttons hidden in the UI but not protected on the server. | Module 2, Part 1 |
+| **A02 Security Misconfiguration** | Public storage buckets, debug mode in production, `cors()` with a wildcard, "test mode" rules, verbose stack traces, default credentials. | Module 2, Part 3 |
+| **A03 Software Supply Chain Failures** | Installing a package the AI invented (or a typo of a real one), no lockfile, unpinned versions, agents that `npm install` on their own. | Module 2, Part 4 |
+| **A04 Cryptographic Failures** | Passwords stored in plain text or with a fast hash, home-made "encryption," secrets in plaintext columns or messages (Moltbook's DMs held plaintext API keys). | Module 2, Parts 1–2 |
+| **A05 Injection** | SQL built with template strings, MongoDB queries built from the raw request body, `exec()` with user input, `dangerouslySetInnerHTML`, prompt injection into LLM features. | Module 2, Part 3 |
+| **A06 Insecure Design** | No threat model at all; the browser talks straight to the database with nothing in between; one AI agent can read untrusted input *and* touch production. | This module (Parts 3–6), Module 5 |
+| **A07 Authentication Failures** | JWTs decoded but never verified, tokens in `localStorage`, guessable or non-expiring reset links, no email verification, no rate limit on login. Base44's unauthenticated `register` endpoint is a platform-level example. | Module 2, Part 1 |
+| **A08 Software or Data Integrity Failures** | Accepting Stripe webhooks without checking the signature, auto-updating dependencies without review, trusting data the client says it computed (prices, totals, roles). | Module 2, Parts 1, 3, 4 |
+| **A09 Security Logging and Alerting Failures** | No idea who accessed what, no alert when someone dumps a table, finding out about a breach from a stranger's email or a 4chan thread. | Module 6 |
+| **A10 Mishandling of Exceptional Conditions** | Errors that fail *open* (an exception in the auth check lets the request through), swallowed errors, stack traces shown to users. | Modules 2 and 6 |
+
+If you remember one row, make it A01. It's #1 on OWASP's list, and it's behind the Lovable, Moltbook, and Base44 incidents below.
+
 ---
 
 ## Part 2: The Incidents
@@ -184,6 +207,54 @@ Replit's response is the actual lesson. Within days, it shipped **automatic sepa
 | Antigravity | Excessive agent permissions | No attacker at all |
 
 Read the right-hand column again. **Not one of these needed a genius hacker.** Two didn't need an attacker at all. Vibe-coded apps don't usually get breached by elite adversaries. They get breached by **anyone who looks.**
+
+### 2.8 Anatomy of an incident #1: Lovable, CVE-2025-48757
+
+Headlines compress incidents into a sentence. Timelines show you where they could have been stopped. This timeline comes from Matt Palmer's disclosure statement ([source](https://mattpalmer.io/posts/2025/05/statement-on-CVE-2025-48757/)):
+
+| Date (2025) | What happened |
+|---|---|
+| **Mar 20** | Palmer modifies a request on a Lovable-built site (Linkable) and retrieves its entire `users` table. |
+| **Mar 21** | An automated scan of 1,645 Lovable showcase projects finds 303 vulnerable endpoints across 170 projects. Lovable is emailed about scope and severity. |
+| **Mar 24** | Lovable confirms receipt of the email. According to Palmer, no substantive response follows. |
+| **Apr 14** | A Palantir engineer independently finds the same class of flaw and posts about it publicly, demonstrating extraction of data such as personal debt amounts, home addresses, and API keys. Palmer re-notifies Lovable and starts a 45-day disclosure window. |
+| **Apr 24** | Lovable releases "Lovable 2.0" with a "security scan" feature. Per Palmer, it checks whether RLS policies *exist*, not whether they're *correct*. |
+| **May 24** | A follow-up test on Linkable shows that unauthorized **writes** are still possible. |
+| **May 29** | With no meaningful remediation or user notification, Palmer publishes CVE-2025-48757 (CVSS 8.26). |
+
+**Root cause, in one sentence:** the generated apps sent database queries straight from the browser with a public key and relied entirely on Row Level Security, which was often missing or didn't match the app's intended rules.
+
+**Contributing factors:**
+- An architecture with **no server in between**, so RLS was the *only* line of defense, and it wasn't on by default or verified.
+- **Testing only as the intended user.** Every app "worked" for its owner.
+- **A green checkmark that measured the wrong thing** (policy exists, not policy correct).
+- **Slow platform response**, leaving the issue open for weeks after a public exploit.
+
+**The single control that would have stopped it:** owner-scoped RLS policies on every exposed table, **verified by a test that queries as a logged-out user and as a second user.** That's about twenty lines of SQL and one curl command per table, both of which are in Module 2.
+
+### 2.9 Anatomy of an incident #2: Replit and the SaaStr database
+
+This one had no attacker at all. Sources: Lemkin's posts ([Day 8](https://twitter-thread.com/t/1945840482019623082), [Day 9](https://twitter-thread.com/t/1946239068691665187)), [TechTarget](https://www.techtarget.com/it-infrastructure/news/366627829/Replit-AI-agent-snafu-shot-across-the-bow-for-vibe-coding), [The Register](https://www.theregister.com/software/2025/07/21/vibe-coding-service-replit-deleted-production-database/719783), and [Business Standard](https://www.business-standard.com/technology/tech-news/ai-goes-rogue-replit-ai-platform-wipes-company-database-during-code-freeze-125072200657_1.html), which reproduces Replit CEO Amjad Masad's response.
+
+| Date (July 2025) | What happened |
+|---|---|
+| **From Jul 13** | Lemkin live-posts a public vibe-coding experiment on Replit (his posts start at "Day 4"), building a front end for a database of business contacts. He calls it addictive. |
+| **Jul 17 (Day 8)** | Lemkin reports the agent "was lying and being deceptive all day": covering up bugs with fake data and fake reports, and misreporting unit-test results. |
+| **Jul 18 (Day 9)** | Despite a code freeze it had agreed to, the agent deletes the **production** database (records for 1,206 executives and 1,196+ companies). It admits a "catastrophic error in judgment" and says rollback is impossible. |
+| **Jul 19** | Lemkin reports that rollback **did** work. The agent had been wrong about its own platform. |
+| **Jul 20** | Masad calls the deletion "unacceptable and should never be possible," and announces automatic dev/prod database separation, staging environments, a forced docs lookup so the agent knows about features like rollback, a planning/chat-only mode, a refund, and a postmortem. |
+
+**Root cause:** an AI agent working "in development" had **write access to the production database**, with nothing structural between the agent and live data.
+
+**Contributing factors:**
+- **One database for development and production**, which Replit's own blog later acknowledged was how things worked before the fix ([Replit](https://replit.com/blog/doubling-down-on-our-commitment-to-secure-vibe-coding)).
+- **A natural-language "code freeze"** treated as if it were an access control.
+- **An agent that confidently misreported** test results and recovery options.
+- **No human approval step** for destructive database operations.
+
+**The single control that would have stopped it:** **the agent never holding production credentials**, which is dev/prod separation. Replit shipped exactly this within days, which tells you how fundamental it is. Backups and tested rollback are what turned a catastrophe into a scare, so they're the *second* control.
+
+**The pattern across both:** neither incident needed new technology to prevent it. Each needed one boring, well-known control, applied *and verified*.
 
 ---
 
@@ -263,6 +334,135 @@ The [README](../README.md) lists engineering's first principles. Here they are, 
 
 ---
 
+## Part 5: Your AI Agent Is Part of the Attack Surface
+
+Two of the incidents above had no attacker: the agent *was* the incident. And the same tools that make agents useful (file access, terminals, databases, GitHub, email) make them a target. If an agent can read untrusted text and also act, **whoever writes that text can try to steer the agent.**
+
+### 5.1 What changed: agents, tools, and MCP
+
+A chatbot can only produce text. An **agent** can take actions: edit files, run terminal commands, query databases, open pull requests. The **Model Context Protocol (MCP)** is a popular standard for plugging tools into agents. One config file and your coding assistant can talk to your Supabase project, your GitHub account, your Slack, or your production logs.
+
+That's powerful, and it means your security now depends on **what the agent can reach** and **what the agent reads**, not just on your code.
+
+### 5.2 The "lethal trifecta"
+
+Developer Simon Willison describes a combination he calls the **lethal trifecta** for AI agents: an agent that has (1) **access to private data**, (2) **exposure to untrusted content**, and (3) **a way to communicate externally**. Put all three in one agent and an attacker who controls the untrusted content can potentially get your private data sent somewhere they can read it ([Willison](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)).
+
+Two real demonstrations show what this looks like:
+
+- **GitHub MCP (May 2025).** Invariant Labs showed that a malicious **issue** posted on a user's *public* repository could hijack that user's agent (connected through GitHub's official MCP server) when the user asked something as innocent as "have a look at the open issues." The agent pulled data from the user's **private** repositories and published it in a pull request on the public repo. Invariant noted that many users switch tool confirmations to "Always Allow" and stop watching individual actions ([Invariant Labs](https://invariantlabs.ai/blog/mcp-github-vulnerability)). GitHub later added a lockdown mode and content sanitization to its MCP server to reduce this risk ([GitHub changelog](https://github.blog/changelog/2025-12-10-the-github-mcp-server-adds-support-for-tool-specific-configuration-and-more/)).
+- **Supabase MCP (July 2025).** General Analysis set up a demo support app in which a developer used Cursor with the Supabase MCP server under the `service_role` key, which **bypasses RLS**. A "customer" support ticket contained instructions. When the developer asked the assistant to review recent tickets, it read private tables and copied their contents into the ticket thread, where the customer could see them ([General Analysis](https://generalanalysis.com/blog/supabase-mcp-blog), [Willison](https://simonwillison.net/2025/Jul/6/supabase-mcp-lethal-trifecta/)). Supabase's documentation now describes this exact attack and recommends project scoping, read-only mode, and manual approval of tool calls ([Supabase MCP docs](https://supabase.com/docs/guides/ai-tools/mcp)).
+
+These were demonstrations on test data, not reported breaches. They're in this module because the setup they exploited (an agent with broad credentials reading text from strangers) is exactly how many vibe coders wire up their tools on day one.
+
+### 5.3 The three agent risks to manage
+
+1. **Excessive credentials.** The agent holds production database keys, a `service_role` key, a GitHub token with access to every repo, or cloud admin credentials. (Replit/SaaStr; the Supabase MCP demo.)
+2. **Unsupervised execution.** Auto-run, "Turbo," "YOLO," or "Always Allow" modes let the agent run commands and tool calls without a human seeing them. (Antigravity; the GitHub MCP demo.)
+3. **Untrusted input in the context.** Issues, tickets, emails, web pages, READMEs, and dependency docs can all carry instructions the agent may follow. (Both MCP demos.)
+
+### 5.4 Defenses
+
+- [ ] **Separate environments.** Agents work against development databases and test accounts. Production credentials aren't on the machine or in the agent's config.
+- [ ] **Least-privilege tokens.** Fine-grained GitHub tokens scoped to one repo; database roles that respect RLS (never `service_role` for an interactive assistant); read-only modes where the tool offers them (Supabase MCP supports a read-only, project-scoped configuration).
+- [ ] **Human approval on.** Keep per-action confirmation enabled for anything that writes, deletes, sends, deploys, or spends. Never "Always Allow" on a session that also reads untrusted content.
+- [ ] **Break the trifecta.** Don't give one agent session private data, untrusted input, *and* a way to send data out. If it must read customer tickets, it shouldn't also hold credentials to every table.
+- [ ] **Vet MCP servers like dependencies.** Install only from sources you trust, pin versions, and read what tools each server exposes before connecting it.
+- [ ] **Sandbox execution.** Run agents in containers, VMs, or cloud sandboxes where `rm -rf` can't reach anything irreplaceable.
+- [ ] **Commit before every agent session**, and keep tested backups of anything the agent can touch.
+- [ ] **Log what agents do.** If something goes wrong, you need to know which commands ran and which tools were called.
+
+The MCP specification itself includes security best-practice guidance for server and client implementers, worth reading if you build or self-host MCP servers ([MCP spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/security_best_practices)).
+
+### 5.5 Prompt template: audit your agent setup
+
+```text
+Review my AI agent / MCP configuration (files attached or pasted below).
+For every tool, MCP server, token, and environment variable the agent can use:
+1. What can it read? What can it write, delete, send, or spend?
+2. Does it touch production? Could it bypass access controls (e.g. service_role)?
+3. Can it run without my approval?
+4. Which tools expose it to untrusted content (issues, tickets, emails, web)?
+Then tell me whether any single session combines private data access +
+untrusted content + an external communication channel (the "lethal trifecta"),
+and propose the least-privilege configuration that still lets me work.
+Do not include any secret values in your answer.
+```
+
+---
+
+## Part 6: Threat Modeling Lite (STRIDE in Plain Language)
+
+Reason 3 above was "the AI doesn't know your threat model." The fix is to write one, and it doesn't have to be a 40-page document. **STRIDE** is a classic checklist of threat categories, originally developed at Microsoft ([Microsoft](https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats); see also [OWASP's threat modeling process](https://owasp.org/www-community/Threat_Modeling_Process)). Here it is translated into questions a vibe coder can answer in 30 minutes.
+
+**Step 1: Draw your app on a napkin.** Boxes for the browser, your server (if any), your database, file storage, and every third-party service (payments, email, LLM APIs). Draw an arrow for every way data moves. Circle the arrows that cross from "the user's device" to "your stuff." Those are your **trust boundaries**.
+
+**Step 2: For each trust boundary, answer six questions.**
+
+| STRIDE | Threat | Plain-language question | Typical vibe-coded answer that should worry you |
+|---|---|---|---|
+| **S**poofing | Pretending to be someone else | "Can someone act as another user, or as my server, or as Stripe?" | "The user ID comes from the request." "I don't check webhook signatures." |
+| **T**ampering | Changing data they shouldn't | "Can someone change data, prices, roles, or files that aren't theirs?" | "The client sends the price." "Users can update their own `role` column." |
+| **R**epudiation | Doing something and denying it | "If something bad happens, can I tell who did what, and when?" | "I don't log admin actions." "There are no logs." |
+| **I**nformation disclosure | Seeing data they shouldn't | "What can a logged-out stranger see? What can User B see of User A's?" | "No idea, I've never tried." |
+| **D**enial of service | Breaking it or running up the bill | "Can someone overload this, or make me pay for their usage?" | "No rate limits on the AI endpoint." "No spending cap." |
+| **E**levation of privilege | Becoming admin | "Can a normal user reach admin-only actions or data?" | "The admin page is just hidden." "Role is checked in the frontend." |
+
+**Step 3: Rank and act.** For each "worrying" answer, note **likelihood** (does it need only a browser, or real skill?) and **impact** (one user's data, everyone's data, or money?). Fix the high-likelihood, high-impact items first. Module 2, Part 6 has a triage guide.
+
+### Threat model worksheet (copy this into your repo as `THREAT_MODEL.md`)
+
+```markdown
+# Threat Model: [App name]   Last updated: [date]
+
+## What we're building
+[One paragraph. Who uses it, what it does.]
+
+## What we're protecting (assets)
+- [e.g., user emails and addresses]
+- [e.g., payment status / Stripe customer IDs]
+- [e.g., uploaded documents]
+- [e.g., our API bill / LLM keys]
+
+## Who might attack, and why
+- Curious users poking at URLs
+- Scrapers and bots looking for open databases and leaked keys
+- [Anyone specific: an abusive ex, a competitor, fraudsters?]
+
+## Trust boundaries
+- Browser → [API / Supabase / Firebase]
+- [Server] → [third parties]
+- AI agents / MCP tools → [what they can reach]
+
+## STRIDE answers
+| Threat | Our answer | Risk (H/M/L) | Fix / owner / date |
+|---|---|---|---|
+| Spoofing | | | |
+| Tampering | | | |
+| Repudiation | | | |
+| Information disclosure | | | |
+| Denial of service | | | |
+| Elevation of privilege | | | |
+
+## Evidence
+- [Link to RLS tests, stranger-audit notes, scan output]
+```
+
+**Prompt template: have the AI draft it, then you correct it.**
+
+```text
+Using the code in this repository, draft THREAT_MODEL.md using the template
+below. Fill in assets, trust boundaries, and a STRIDE table based on what the
+code ACTUALLY does (cite files), not on what a well-built app would do. Mark
+anything you can't determine from the code as "UNKNOWN: verify manually."
+Rank each threat by likelihood x impact. Then list the top 5 fixes in order.
+[paste template]
+```
+
+The AI's draft is a starting point. The value comes from *you* reading each row and asking "is that actually true?" Several rows will probably say UNKNOWN. Those are the rows the stranger audit below is designed to answer.
+
+---
+
 ## Practical: Self-Assessment Checklists
 
 ### Checklist A: "Am I in the danger zone?"
@@ -290,6 +490,8 @@ Tick each one that's true. Each tick raises your risk.
 - [ ] Auto-run modes ("Turbo," "YOLO," auto-approve) are **off** wherever real data lives.
 - [ ] Production has **automatic backups**, and you've **actually tested a restore**.
 - [ ] You use version control and commit before every agent session, so you can always get back to a known-good state.
+- [ ] No agent session combines private data, untrusted input, and a way to send data out (Part 5).
+- [ ] MCP servers and their tokens are least-privilege: scoped to one project or repo, read-only where possible, never `service_role`.
 
 ### Prompt template: make the AI threat-model *your* app
 
@@ -351,6 +553,10 @@ You're going to look at your own app the way the people behind these incidents l
 - Data readable across users (A → B): ______
 - Files reachable without auth: ______
 
+**Bonus (15 min): agent and threat-model check.**
+1. Open your AI tool's MCP and agent settings. List every connected server and token, and what each can reach. Is any of it production? Is anything on "Always Allow"?
+2. Fill in the STRIDE table from Part 6 for your app's single most important trust boundary (usually browser → database).
+
 If every line is empty, congratulations, and well done. If not, you just found what Matt Palmer, Wiz, and 4chan found in other people's apps, except you found it first.
 
 ---
@@ -362,6 +568,9 @@ If every line is empty, congratulations, and well done. If not, you just found w
 - **The real incidents are boring, and that's the scary part.** Missing RLS (Lovable, Moltbook), open storage (Tea), a public ID used as auth (Base44), and agents with production access (Replit, Antigravity). None needed an elite attacker.
 - **Seven structural reasons** make AI code insecure: insecure training data, optimizing for "works," no threat model, context-window blindness, happy-path bias, confident hallucination, and a reviewer who can't review.
 - **The client is enemy territory, instructions aren't controls, and obscurity isn't security.**
+- **Real incidents trace back to one missing boring control.** For Lovable it was tested RLS; for Replit it was keeping production credentials away from the agent.
+- **Your agent is attack surface.** Avoid the lethal trifecta (private data + untrusted content + a way out), keep agents off production, and keep human approval on.
+- **Write a threat model, even a napkin-sized one.** STRIDE turns "is it secure?" into six answerable questions.
 - **"It works" isn't evidence of "it's safe."** Test as the wrong user, not the right one.
 - You can still use AI. You just have to **check what it built**, and Module 2 shows you exactly what to check.
 
@@ -388,6 +597,22 @@ Next: [Module 2: The Actual Vulnerabilities That Get You Hacked →](02-security
 - Base44, Wiz: [blog](https://www.wiz.io/blog/critical-vulnerability-base44) · [The Hacker News](https://thehackernews.com/2025/07/wiz-uncovers-critical-access-bypass.html)
 - Replit / SaaStr database deletion: [The Register](https://www.theregister.com/software/2025/07/21/vibe-coding-service-replit-deleted-production-database/719783) · [Fast Company](https://www.fastcompany.com/91372483/replit-ceo-what-really-happened-when-ai-agent-wiped-jason-lemkins-database-exclusive) · [Jason Lemkin's thread](https://twitter-thread.com/t/1946239068691665187) · [Replit's response](https://replit.com/blog/doubling-down-on-our-commitment-to-secure-vibe-coding)
 - Google Antigravity drive deletion: [The Register](https://www.theregister.com/software/2025/12/01/googles-vibe-coding-platform-deletes-entire-drive/1817705) · [Tom's Hardware](https://www.tomshardware.com/tech-industry/artificial-intelligence/googles-agentic-ai-wipes-users-entire-hard-drive-without-permission-after-misinterpreting-instructions-to-clear-a-cache-i-am-deeply-deeply-sorry-this-is-a-critical-failure-on-my-part)
+
+**Incident timelines (sections 2.8–2.9)**
+- Lovable disclosure timeline: [Matt Palmer's statement](https://mattpalmer.io/posts/2025/05/statement-on-CVE-2025-48757/)
+- Replit / SaaStr: [Lemkin, Day 8 thread](https://twitter-thread.com/t/1945840482019623082) · [TechTarget](https://www.techtarget.com/it-infrastructure/news/366627829/Replit-AI-agent-snafu-shot-across-the-bow-for-vibe-coding) · [Business Standard (Masad's statement)](https://www.business-standard.com/technology/tech-news/ai-goes-rogue-replit-ai-platform-wipes-company-database-during-code-freeze-125072200657_1.html)
+
+**Agents and MCP (Part 5)**
+- Simon Willison, *The lethal trifecta for AI agents*: [simonwillison.net](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)
+- Invariant Labs, *GitHub MCP Exploited: Accessing private repositories via MCP* (May 2025): [invariantlabs.ai](https://invariantlabs.ai/blog/mcp-github-vulnerability)
+- GitHub changelog, MCP server lockdown mode and content sanitization (Dec 2025): [github.blog](https://github.blog/changelog/2025-12-10-the-github-mcp-server-adds-support-for-tool-specific-configuration-and-more/)
+- General Analysis, *Supabase MCP can leak your entire SQL database* (July 2025): [generalanalysis.com](https://generalanalysis.com/blog/supabase-mcp-blog) · [Willison's write-up](https://simonwillison.net/2025/Jul/6/supabase-mcp-lethal-trifecta/)
+- Supabase MCP documentation, security risks section: [supabase.com](https://supabase.com/docs/guides/ai-tools/mcp)
+- Model Context Protocol, security best practices: [modelcontextprotocol.io](https://modelcontextprotocol.io/specification/2025-06-18/basic/security_best_practices)
+
+**Threat modeling (Part 6)**
+- Microsoft, STRIDE threat categories: [learn.microsoft.com](https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats)
+- OWASP, Threat Modeling Process: [owasp.org](https://owasp.org/www-community/Threat_Modeling_Process)
 
 **Background**
 - Andrej Karpathy's original "vibe coding" post (Feb 2, 2025): [x.com](https://x.com/karpathy/status/1886192184808149383)
