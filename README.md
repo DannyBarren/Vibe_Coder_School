@@ -152,6 +152,8 @@ If that distinction makes sense to you, you’re in the right place.
 
 ---
 
+![credit](TiLlh.jpg)
+
 *Software Engineering for Vibe Coders: What You Don’t Know You Don’t Know*  
 The course for when “it mostly works” stops being good enough.
 
