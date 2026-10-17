@@ -23,8 +23,7 @@ By the end of this module you will be able to:
 ---
 
 ## Vibe Fail: The Discount That Applied Itself Twice
-
-*(Illustrative story. The pattern is real; the company is made up.)*
+*Illustrative composite.*
 
 Maya runs a small online store for hand-printed posters. She asks her AI assistant: "Add a 10% discount code, SAVE10, at checkout." Thirty seconds later there's a working coupon field. She types SAVE10, the total drops by 10%, she clicks Accept All, and she deploys.
 
@@ -219,7 +218,7 @@ const subtotal = items.reduce((s, i) => s + i.price * i.qty, 0);
 const total = applyDiscount(subtotal, code) * 0.9; // discount applied twice
 ```
 
-This isn't just a vibe-coder problem; it shows up in the data. GitClear's analysis of 211 million changed lines found that 2024 was the first year copy/pasted lines outnumbered "moved" (refactored) lines, with an eightfold rise in duplicated blocks of five or more lines ([GitClear 2025 report](https://www.gitclear.com/ai_assistant_code_quality_2025_research/)). Duplication means every bug fix has to be made in N places, and you'll remember N-1 of them.
+This isn't just a vibe-coder problem; it shows up in the data. GitClear's analysis of 211 million changed lines found that 2024 was the first year copy/pasted lines outnumbered "moved" (refactored) lines, and that the frequency of duplicated code blocks (five or more duplicated lines) rose eightfold during 2024 ([GitClear 2025 report](https://www.gitclear.com/ai_assistant_code_quality_2025_research/)). Duplication means every bug fix has to be made in N places, and you'll remember N-1 of them.
 
 **What good looks like:** one function, one place, imported everywhere.
 
@@ -276,7 +275,7 @@ And if you see a `sleep()` "fixing" something, that's a bug wearing a disguise. 
 
 #### Red flag 5: Hallucinated APIs and packages
 
-The model confidently calls `stripe.charges.createAndCapture()` or `supabase.auth.getUserSafe()`. These sound plausible. They don't exist. Sometimes the code fails immediately (good, at least you notice). Sometimes it's in a branch that rarely runs (bad: it fails in production months later). Sometimes it's a whole **package** that doesn't exist, which attackers now register on purpose. A USENIX Security 2025 study of 576,000 generated code samples found that 19.7% of recommended packages were hallucinations ([Spracklen et al., USENIX Security 2025](https://www.usenix.org/conference/usenixsecurity25/presentation/spracklen)). The supply-chain side of this is covered in [Module 2](02-security-vulnerabilities.md).
+The model confidently calls `stripe.charges.createAndCapture()` or `supabase.auth.getUserSafe()`. These sound plausible. They don't exist. Sometimes the code fails immediately (good, at least you notice). Sometimes it's in a branch that rarely runs (bad: it fails in production months later). Sometimes it's a whole **package** that doesn't exist, which attackers now register on purpose. A USENIX Security 2025 study of 576,000 generated code samples found that 19.7% of the package references in that code pointed to packages that don't exist (440,445 of 2.23 million; [Spracklen et al., USENIX Security 2025](https://www.usenix.org/conference/usenixsecurity25/presentation/spracklen)). The supply-chain side of this is covered in [Module 2](02-security-vulnerabilities.md).
 
 **How to check:** "Go to Definition" on the method. If your editor can't find it in the library's type definitions, be very suspicious. Search the official docs, not the AI's memory. For packages, look them up on npm/PyPI: real download counts, a real repo, a real maintainer, a history longer than last week.
 
@@ -319,7 +318,7 @@ Git is your undo button, your audit log, and your review tool. Vibe coders often
 
 **Habits:**
 
-1. **Commit before every AI session.** Clean working tree, then prompt. If the agent wrecks things, `git restore .` or `git reset --hard` (on uncommitted local work only) takes you back.
+1. **Commit before every AI session.** Clean working tree, then prompt. If the agent wrecks things, `git restore .` throws away all uncommitted changes to tracked files, and `git reset --hard` throws away *every* uncommitted change, staged or not. Both are permanent and both take you straight back to your last commit, which is exactly why you commit *before* the session: the only work you can lose is the agent's.
 2. **One logical change per commit.** "Add discount code validation" is a commit. "Stuff" is not.
 3. **Review the diff before you commit.** `git diff` (unstaged) and `git diff --staged` (staged). Your AI tool's diff view is fine too. The point is that *a human looks at it.*
 4. **Stage selectively.** `git add -p` lets you accept changes hunk by hunk. It's the manual version of "Accept some."
@@ -383,6 +382,217 @@ git bisect reset
 ```
 
 Bisect only works well if your commits are **small and each one runs**. That's one more reason for the habits above: a history of "wip", "stuff", and "fix" commits, half of which don't build, turns your detective kit into a pile of noise.
+
+### 8. Reading a stack trace, step by step
+
+The vibe-coder move with a stack trace is to copy all of it, paste it into the chat, and type "fix." Sometimes that works. Often the AI patches the line at the top, which is where the error *surfaced*, not where it was *caused*. Two minutes of reading gets you much better fixes, and much better prompts.
+
+Here's a real Node.js stack trace from a checkout that crashed (the files are a tiny three-layer app: route → service → pricing):
+
+```text
+file:///app/src/lib/pricing.js:2
+  return items.reduce((sum, item) => sum + item.product.priceCents * item.quantity, 0);
+                                                        ^
+
+TypeError: Cannot read properties of undefined (reading 'priceCents')
+    at file:///app/src/lib/pricing.js:2:57
+    at Array.reduce (<anonymous>)
+    at calculateTotal (file:///app/src/lib/pricing.js:2:16)
+    at createOrder (file:///app/src/services/orderService.js:4:22)
+    at postCheckout (file:///app/src/routes/checkout.js:3:10)
+    at file:///app/src/routes/checkout.js:5:1
+    at ModuleJob.run (node:internal/modules/esm/module_job:263:25)
+    at async ModuleLoader.import (node:internal/modules/esm/loader:540:24)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)
+```
+
+Read it in this order:
+
+1. **The error type and message** (`TypeError: Cannot read properties of undefined (reading 'priceCents')`). Translate it into English: "something was `undefined`, and the code tried to read `.priceCents` from it." So the question isn't "what's wrong with `priceCents`?" It's "**why is `item.product` undefined?**"
+2. **The top frame in *your* code** (`pricing.js:2:57`, line 2, column 57). The caret (`^`) points at the exact spot: `item.product.priceCents`. This is where it *blew up*.
+3. **Walk down the frames** to see who called whom: `calculateTotal` ← `createOrder` (orderService.js line 4) ← `postCheckout` (checkout.js line 3). Each line is "called from here." The stack is a breadcrumb trail, newest on top.
+4. **Skip frames that aren't yours.** `Array.reduce (<anonymous>)` and anything starting with `node:internal` or living in `node_modules` is plumbing. Occasionally the bug is in a library, but bet on your own code first.
+5. **Find where the bad value was *made*, not where it was *used*.** `pricing.js` just used `item.product`. Where did `product` come from? Open `orderService.js` line 3:
+
+```js
+const items = cart.items.map((i) => ({ ...i, product: cart.products[i.productId] }));
+```
+
+There it is: a cart item references `p_221`, the products lookup has no `p_221` (maybe it was deactivated or deleted), so `product` is `undefined`. The real fix belongs *here* (or in the code that loads products), with a decision about what should happen: reject the checkout with "this item is no longer available"? Remove it from the cart?
+
+The tempting AI fix at the top of the stack, `item.product?.priceCents ?? 0`, makes the crash disappear and **gives the item away for free.** That's what "fixing the symptom" looks like in money.
+
+Python tracebacks contain the same information, but **in the opposite order**: the most recent call is at the *bottom*, right above the error. Here's the same bug in Python:
+
+```text
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/app/app/main.py", line 3, in <module>
+    create_order({"id": "u_1"}, {"items": [{"product_id": "p_221", "quantity": 1}], "products": {}})
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/orders.py", line 5, in create_order
+    return {"user_id": user["id"], "total_cents": calculate_total(items)}
+                                                  ~~~~~~~~~~~~~~~^^^^^^^
+  File "/app/app/pricing.py", line 2, in calculate_total
+    return sum(item["product"]["price_cents"] * item["quantity"] for item in items)
+  File "/app/app/pricing.py", line 2, in <genexpr>
+    return sum(item["product"]["price_cents"] * item["quantity"] for item in items)
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+TypeError: 'NoneType' object is not subscriptable
+```
+
+Start at the **last line** (`'NoneType' object is not subscriptable`: something was `None` and the code did `something[...]`), then go up: the `^^^^` marks `item["product"]` in `pricing.py`, called from `orders.py` line 5, called from `main.py`. The `<frozen runpy>` lines are Python starting your program; ignore them. Same root cause: `cart["products"].get(...)` returned `None` for a missing product.
+
+**A good prompt from a stack trace** includes your reading, not just the paste:
+
+```text
+Here's a stack trace [paste]. I believe the root cause is that
+orderService.js line 3 sets product to undefined when a cart item references
+a product that no longer exists. Confirm or correct that by reading the code.
+Don't change pricing.js. Propose how createOrder should handle missing
+products (I want a 409 "item no longer available", not a free item), and
+write a failing test for it first.
+```
+
+### 9. Worked example: reading an unfamiliar repo in 30 minutes
+
+*(Illustrative composite.)* A friend asks you to look at "quickbill," an invoicing app a contractor built with an AI agent before disappearing. Real customers send real invoices with it. You've never seen the code. Here's the orientation tour from section 3, done for real, with the commands and what each one tells you.
+
+**Minute 0-5: what is it, and how does it run?**
+
+```bash
+git clone <repo> quickbill && cd quickbill
+cat README.md                       # "Next.js app. Run npm run dev." That's it.
+jq '.scripts, .dependencies' package.json
+```
+
+The scripts show `dev`, `build`, `start`, and `lint`. **No `test`, no `migrate`.** The dependencies show `next`, `@supabase/supabase-js`, `stripe`, `resend`, and, interestingly, both `moment` and `date-fns` (two date libraries: a duplication smell before reading a single line).
+
+**Minute 5-12: what can the outside world call?**
+
+```bash
+rg --files app | rg "route\.(ts|js)$"          # every API route
+rg -n "export async function (GET|POST|PUT|PATCH|DELETE)" app/api
+```
+
+Fourteen routes. Four of them are under `app/api/admin/`. You note which routes change data (POST/PUT/PATCH/DELETE): nine.
+
+**Minute 12-18: where's the data, and who's allowed to touch it?**
+
+```bash
+ls supabase/migrations 2>/dev/null || echo "no migrations folder"
+rg -n "createClient\(" --glob '!node_modules'
+rg -n "SERVICE_ROLE|service_role" --glob '!node_modules'
+rg -n "auth\.getUser|getSession|requireUser" app/api
+```
+
+No migrations folder: the schema was clicked together in the Supabase dashboard (so it exists only in production; see [Module 7](07-data-modeling.md)). The service-role key is used in `lib/supabase-admin.ts`, which is imported by... `app/api/invoices/[id]/route.ts`. And that route doesn't call `getUser` at all. You've found the most important thing in the repo in under 20 minutes: **a route that uses the all-powerful key with no login check.** That goes straight to the top of the list (and to [Module 2](02-security-vulnerabilities.md)).
+
+**Minute 18-24: config and secrets**
+
+```bash
+cat .env.example 2>/dev/null || echo "no .env.example"
+rg -o --no-filename "process\.env\.\w+" --glob '!node_modules' | sort | uniq -c
+git log --all --oneline -- .env .env.local     # was a real .env ever committed?
+```
+
+Eleven environment variables, no `.env.example`, and `git log` shows `.env.local` was committed once and "removed" in the next commit. Removing it doesn't remove it from history: those keys need rotating.
+
+**Minute 24-30: history and tests**
+
+```bash
+git log --oneline | wc -l           # 212 commits
+git log --oneline | head -15        # "fix", "fix again", "update", "wip"...
+git log --format= --name-only | sort | uniq -c | sort -rn | head -5   # most-changed files
+rg --files -g '*.test.*' -g '*.spec.*' | wc -l    # 0
+```
+
+The most-changed file is `app/dashboard/page.tsx` (94 commits). Zero tests.
+
+**The one-paragraph summary you write at minute 30:**
+
+> quickbill is a Next.js app on Supabase (Postgres + Auth), sending email via Resend and taking payments via Stripe. 14 API routes, 9 of which change data. No tests, no migrations (schema only exists in the production dashboard), no `.env.example`. **Top risks:** (1) `GET/PATCH /api/invoices/[id]` uses the service-role key without checking the user, so anyone with an invoice ID can read or edit it; (2) secrets were committed to git history and must be rotated; (3) `dashboard/page.tsx` is the churn hotspot (94 commits) and will be the riskiest file to change. Next steps: fix (1) today, rotate keys, export the schema into migrations, add auth tests for the invoice routes.
+
+That paragraph is the deliverable. Notice you read maybe 200 lines of actual code to write it. Orientation isn't about reading everything; it's about asking the right questions of the repo, in the right order.
+
+### 10. Spotting race conditions and N+1 queries in a diff
+
+Two kinds of bugs pass every demo and only show up with real traffic: **race conditions** (two requests at the same time interfere with each other) and **N+1 queries** (fine with 3 records, painfully slow with 3,000). Both are visible in a diff if you know the shape.
+
+#### The race condition shape: read → decide → write
+
+*(Illustrative.)* You asked for "limit the LAUNCH50 coupon to the first 100 customers." The AI wrote:
+
+```diff
++export async function redeemCoupon(code: string, order: Order) {
++  const coupon = await db.coupon.findUnique({ where: { code } });
++  if (!coupon || coupon.timesUsed >= coupon.maxUses) {
++    throw new CouponExhaustedError();
++  }
++  await chargeCustomer(order, coupon.percentOff);
++  await db.coupon.update({
++    where: { code },
++    data: { timesUsed: coupon.timesUsed + 1 },
++  });
++}
+```
+
+Looks reasonable. Now play it out with two customers clicking "Pay" in the same second, with `timesUsed` at 99:
+
+| Time | Request A | Request B |
+|---|---|---|
+| t1 | reads `timesUsed = 99` | |
+| t2 | | reads `timesUsed = 99` |
+| t3 | 99 < 100, OK → charges with discount | |
+| t4 | | 99 < 100, OK → charges with discount |
+| t5 | writes `timesUsed = 100` | |
+| t6 | | writes `timesUsed = 100` (A's increment is lost) |
+
+Two discounts given, counter says one. Now post the code on a deal forum and imagine 2,000 people hitting it in the first minute: the "first 100" coupon gets redeemed several hundred times, and the counter can't even tell you how many.
+
+The shape to look for in any diff: **a value is read, a decision is made in application code, and then a write happens based on the value that was read.** Also: `count + 1` computed in JavaScript or Python, "if it doesn't exist, insert it," and "check the balance, then deduct."
+
+The fix is to make the database do the check and the write as **one atomic step**, and do it *before* charging:
+
+```ts
+// Claim a use atomically; only one request can win the last slot.
+const claimed = await db.$queryRaw<{ percent_off: number }[]>`
+  UPDATE coupons
+  SET times_used = times_used + 1
+  WHERE code = ${code} AND times_used < max_uses
+  RETURNING percent_off`;
+if (claimed.length === 0) throw new CouponExhaustedError();
+
+await chargeCustomer(order, claimed[0].percent_off); // if this fails, release the claim (decrement) or record it for reconciliation
+```
+
+(Prisma's tagged-template `$queryRaw` turns `${code}` into a bound parameter, so this is not string concatenation.) For "insert if not exists," the fix is a `UNIQUE` constraint plus `INSERT ... ON CONFLICT`; for multi-step changes, a transaction ([Module 7](07-data-modeling.md) has the full treatment).
+
+#### The N+1 shape: a query inside a loop
+
+*(Illustrative.)* You asked the AI to "show each order's products on the orders page." The diff:
+
+```diff
+ export async function listOrders(userId: string) {
+-  return db.order.findMany({
+-    where: { userId },
+-    include: { items: { include: { product: true } } },
+-  });
++  const orders = await db.order.findMany({ where: { userId } });
++  for (const order of orders) {
++    order.items = await db.orderItem.findMany({ where: { orderId: order.id } });
++    for (const item of order.items) {
++      item.product = await db.product.findUnique({ where: { id: item.productId } });
++    }
++  }
++  return orders;
+ }
+```
+
+On your test account with 2 orders, it's instant. Do the math for a real customer with 50 orders of 3 items each: 1 query for orders + 50 for items + 150 for products = **201 database round trips** for one page load. At a modest 5 ms per round trip to a hosted database, that's a full second of waiting, before any rendering, and it scales linearly with how loyal your customer is. Your best customers get the slowest page. On usage-billed databases, they also cost you the most.
+
+The shape to look for: **`await` + a query inside a `for`, `.map`, or `forEach`.** The fix is to fetch related data in a fixed number of queries: a join, the ORM's `include`/`select_related`/`prefetch_related`, or one `WHERE id IN (...)` query and a lookup map. The original code (the deleted lines in the diff!) already did it correctly. The AI "simplified" it into a performance bug.
 
 ---
 
@@ -530,4 +740,4 @@ For the next week, commit before every AI session and review every diff before c
 
 ---
 
-**Next up:** [Module 4: Testing Beyond "Ask Claude for Tests"](04-testing.md)
+**Next up:** [Module 4: Testing Beyond "Ask Claude for Tests"](04-testing.md) · [Back to course outline](../course-outline.md)

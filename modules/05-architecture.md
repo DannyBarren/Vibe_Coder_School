@@ -26,10 +26,9 @@ By the end of this module you will be able to:
 ---
 
 ## Vibe Fail: Dashboard.tsx, Line 2,847
+*Illustrative composite.*
 
-*(Illustrative story. If it sounds familiar, that's because it happens constantly.)*
-
-Priya built a project-management app over a few weekends. The AI was incredible: every feature request turned into working code in seconds. All of it went into `Dashboard.tsx`, because that's where the dashboard was.
+Nadia built a project-management app over a few weekends. The AI was incredible: every feature request turned into working code in seconds. All of it went into `Dashboard.tsx`, because that's where the dashboard was.
 
 By month two, `Dashboard.tsx` was 2,900 lines. It contained:
 
@@ -42,7 +41,7 @@ By month two, `Dashboard.tsx` was 2,900 lines. It contained:
 
 Then a customer asked for a tiny change: show overdue tasks in red. The AI made the change. It also broke the billing check (they shared a variable), which unlocked paid features for every free user, and the infinite loop came back, which burned through the database's free tier in an afternoon.
 
-Every new prompt now took longer, broke more things, and the AI's context window couldn't even hold the whole file anymore. Priya didn't have a code problem. She had an **architecture** problem: there was no structure, so every change touched everything.
+Every new prompt now took longer, broke more things, and the AI's context window couldn't even hold the whole file anymore. Nadia didn't have a code problem. She had an **architecture** problem: there was no structure, so every change touched everything.
 
 ---
 
@@ -90,10 +89,12 @@ Most web apps, regardless of framework, can be thought of in four layers:
 - The API layer is thin: authenticate, validate, call a service, return. If your route handler is 300 lines, business logic is leaking into it.
 - Business logic is plain functions that take data and return data. No `req`/`res`, no React, no database client imported directly if you can help it. That makes it trivially testable (see [Module 4](04-testing.md)).
 
+**"But Supabase (or Firebase) has my UI query the database directly."** True, and that's a legitimate design, not a violation, *as long as you understand where the server-side layer went.* When the browser calls `supabase.from("projects").select()`, there's no API route of yours in between. The **Row Level Security policies in the database** are your server-side authorization layer: they decide which rows each user can read and write, and they're the only thing standing between an attacker with your public key and your whole table. So the rule becomes: direct client queries are fine for simple reads and writes that RLS fully protects; anything involving money, plan limits, multi-step workflows, secrets, or other users' data goes through a server route or edge function that runs your service code. If RLS is off or permissive, you don't have a layered app; you have a public database. [Module 2](02-security-vulnerabilities.md) covers RLS in depth.
+
 **Bad: everything in the route handler**
 
 ```ts
-// app/api/orders/route.ts
+// src/app/api/orders/route.ts
 export async function POST(req: Request) {
   const body = await req.json();
   const { data: user } = await supabase.auth.getUser();
@@ -111,7 +112,7 @@ export async function POST(req: Request) {
 **Good: thin route, real layers**
 
 ```ts
-// app/api/orders/route.ts  (API layer)
+// src/app/api/orders/route.ts  (API layer)
 export async function POST(req: Request) {
   const user = await requireUser(req);                 // auth
   const input = CreateOrderSchema.parse(await req.json()); // validation
@@ -119,7 +120,7 @@ export async function POST(req: Request) {
   return Response.json(order, { status: 201 });
 }
 
-// services/orderService.ts  (business logic)
+// src/services/orderService.ts  (business logic)
 export async function createOrder(user: User, input: CreateOrderInput) {
   const products = await productRepo.findByIds(input.productIds);
   const totalCents = pricing.calculateTotal(products, input.couponCode, user);
@@ -128,7 +129,7 @@ export async function createOrder(user: User, input: CreateOrderInput) {
   return order;
 }
 
-// repos/orderRepo.ts  (data access)
+// src/repos/orderRepo.ts  (data access)
 export function insert(order: NewOrder) {
   return db.order.create({ data: order });
 }
@@ -162,7 +163,7 @@ Frameworks blur this line (Next.js server components, server actions, Supabase c
 Signs of tight coupling:
 
 - Changing a database column name requires edits in 25 files, including React components.
-- Two features share a variable, and changing one breaks the other (Priya's billing bug).
+- Two features share a variable, and changing one breaks the other (Nadia's billing bug).
 - Components reach into each other's state.
 - Everything imports from everything (circular imports, or a `utils.ts` that every file depends on).
 - You can't test a function without spinning up the whole app.
@@ -243,6 +244,8 @@ src/
   shared/
     db.ts  config.ts  auth.ts  ui/
 ```
+
+Either works; what matters is picking **one** and writing it down. The examples in this course use the layer-based layout (`src/app`, `src/components`, `src/services`, `src/repos`, `src/lib`), because it maps directly onto the four layers in section 2.
 
 Conventions worth writing down:
 
@@ -326,7 +329,7 @@ src/
     projects/route.ts      # ...way three of fetching projects
 ```
 
-**After**: feature folders, one way to do each thing:
+**After**: one folder per layer, one way to do each thing:
 
 ```text
 src/
@@ -335,22 +338,21 @@ src/
     api/projects/route.ts
     api/webhooks/stripe/route.ts
     dashboard/page.tsx
-  features/
-    projects/
-      components/ProjectList.tsx  ProjectCard.tsx  ProjectFilters.tsx
-      projects.service.ts   # business rules
-      projects.repo.ts      # the ONLY place that queries projects
-      projects.test.ts
-    billing/
-      components/BillingBanner.tsx
-      billing.service.ts    # hasProFeatures() lives here, server-side
-      billing.test.ts
-  shared/
-    db.ts                   # one database client
-    config.ts               # one place that reads env vars
-    format.ts               # one formatDate, one formatMoney
-    payments/               # Stripe wrapped behind an interface (see section 12)
-    llm/
+  components/                # UI only: ProjectList.tsx, ProjectCard.tsx, BillingBanner.tsx
+  services/                  # business rules, server-side
+    projectService.ts
+    projectService.test.ts
+    billingService.ts        # hasProFeatures() lives here
+    billingService.test.ts
+  repos/                     # the ONLY places that query the database
+    projectRepo.ts
+  lib/
+    db.ts                    # one database client
+    config.ts                # one place that reads env vars
+    format.ts                # one formatDate, one formatMoney
+    types.ts  schemas.ts     # shared types and Zod schemas
+    payments/                # Stripe wrapped behind an interface (see section 12)
+    llm/                     # AI SDKs wrapped the same way
 ```
 
 **How to get from before to after without breaking everything:**
@@ -362,7 +364,7 @@ src/
 5. Then extract logic out of the giant component, one piece per commit (section 6).
 6. Delete empty folders and the old patterns. Update `AGENTS.md` to forbid them.
 
-Don't ask for this in one prompt. "Reorganize the project into feature folders" produces a diff nobody can review and at least one broken import you'll discover in production.
+Don't ask for this in one prompt. "Reorganize the whole project" produces a diff nobody can review and at least one broken import you'll discover in production.
 
 ### 10. Architecture Decision Records (ADRs): write down the "why"
 
@@ -383,7 +385,7 @@ accounting export stopped matching Stripe. Stripe's API uses integer minor units
 ## Decision
 All money is stored and computed as integer cents (`*_cents` columns, `number`
 in TypeScript, `int` in Python). Formatting to dollars happens only at display time
-in shared/format.ts.
+in src/lib/format.ts.
 
 ## Consequences
 - Matches Stripe; no float rounding errors.
@@ -403,7 +405,7 @@ A rules file is read automatically, but it's general. Each task also needs **spe
 
 1. **Start fresh for new tasks.** A clean session with the right context beats a 300-message conversation where the original decisions scrolled out of the context window long ago.
 2. **Point at the map.** "Read AGENTS.md and docs/decisions/ before starting."
-3. **Point at the neighbors.** "Follow the same pattern as `features/projects/` (service, repo, tests)." An existing example is worth more than any amount of description.
+3. **Point at the neighbors.** "Follow the same pattern as projects: `src/services/projectService.ts`, `src/repos/projectRepo.ts`, and the tests next to the service." An existing example is worth more than any amount of description.
 4. **Name the boundaries.** Which files it may touch, which it must not.
 5. **Ask for a plan first** (Prompt Template 1), approve it, then implement.
 6. **Close the loop.** If the AI did something you had to correct, add a rule so the next session doesn't repeat it.
@@ -412,8 +414,8 @@ A session-opener you can paste:
 
 ```text
 Context: read AGENTS.md and docs/decisions/. This task follows the existing
-pattern in src/features/projects/ (component → API route → service → repo,
-tests next to the service).
+pattern used for projects: src/app/api/projects/route.ts →
+src/services/projectService.ts → src/repos/projectRepo.ts, tests next to the service.
 Task: [one sentence].
 You may modify: [files/folders]. Do not modify anything else.
 First, reply with a plan: files to create/change, their layer, and existing
@@ -548,7 +550,398 @@ What this buys you:
 - **One place for cross-cutting rules:** timeouts, retries, cost limits, logging, and redaction for every LLM call live in `openaiClient.ts`, not in eleven copies ([Module 6](06-observability.md) and [Module 8](08-deployment.md)).
 - **Real options:** switching or adding a provider is a new implementation of the same interface, not a rewrite.
 
-Don't over-do it (remember the over-engineering red flag in [Module 3](03-reading-code.md)): you don't need a plugin system with a registry. One small interface, one real implementation, one fake. Add the rule to `AGENTS.md`: "Only files in `shared/payments/` may import `stripe`. Only files in `shared/llm/` may import AI SDKs."
+Don't over-do it (remember the over-engineering red flag in [Module 3](03-reading-code.md)): you don't need a plugin system with a registry. One small interface, one real implementation, one fake. Add the rule to `AGENTS.md`: "Only files in `src/lib/payments/` may import `stripe`. Only files in `src/lib/llm/` may import AI SDKs."
+
+### 13. Worked refactor: the fat "invite teammate" handler
+
+Section 2 showed the shape of a thin route. Here's the full trip, step by step, on the kind of handler AI tools produce every day. *(Illustrative, but you'll recognize it.)*
+
+**Before:** one route handler doing authentication, authorization, validation, plan limits, database writes, and email, all at once:
+
+```ts
+// src/app/api/teams/[teamId]/invites/route.ts  (BEFORE)
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import { Resend } from "resend";
+import crypto from "node:crypto";
+
+export async function POST(req: Request, { params }: { params: Promise<{ teamId: string }> }) {
+  try {
+    const { teamId } = await params;
+    const body = await req.json();
+    const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+    const jwt = req.headers.get("authorization")?.replace("Bearer ", "");
+    const { data: { user } } = await supabase.auth.getUser(jwt);
+    if (!user) return NextResponse.json({ error: "no" }, { status: 401 });
+
+    const { data: member } = await supabase.from("team_members")
+      .select("role").eq("team_id", teamId).eq("user_id", user.id).single();
+    if (member?.role !== "owner" && member?.role !== "admin") {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+    if (!body.email || !body.email.includes("@")) {
+      return NextResponse.json({ error: "bad email" }, { status: 400 });
+    }
+    const { count } = await supabase.from("team_members")
+      .select("*", { count: "exact", head: true }).eq("team_id", teamId);
+    const { data: team } = await supabase.from("teams").select("plan, name").eq("id", teamId).single();
+    if (team.plan === "free" && count >= 3) {
+      return NextResponse.json({ error: "upgrade" }, { status: 402 });
+    }
+    const token = crypto.randomBytes(32).toString("hex");
+    await supabase.from("invites").insert({
+      team_id: teamId, email: body.email, role: body.role || "member", token,
+    });
+    const resend = new Resend(process.env.RESEND_KEY);
+    await resend.emails.send({
+      from: "team@example.com", to: body.email, subject: `Join ${team.name}`,
+      html: `<a href="https://example.com/invite/${token}">Join</a>`,
+    });
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    console.log(e);
+    return NextResponse.json({ error: "something went wrong" }, { status: 500 });
+  }
+}
+```
+
+It works in the demo. Now read it as a reviewer:
+
+1. **`role: body.role || "member"`**: the role comes straight from the request. An admin can send `"role": "owner"` and mint a new owner. That's privilege escalation in one line.
+2. **The free-plan limit counts members but not pending invites.** A free team can send 40 invites at once, and all 40 can accept. Real revenue leak.
+3. **`Sam@Example.com` and `sam@example.com` are different people** to this code. Duplicate invites, duplicate seats.
+4. **Click "Invite" twice and you get two invites and two emails.**
+5. **If the email fails after the insert,** the user sees "something went wrong," clicks again, and creates another invite.
+6. **It's untestable** without a live Supabase project and a real email provider. So nobody tests it, so nobody notices 1-5.
+
+**Step 1: commit, then pin the behavior.** Before moving code, list what it must do (the six problems above become requirements). In a real codebase, you'd also add an integration test around the route first ([Module 4](04-testing.md)).
+
+**Step 2: pull validation into a schema.** One place that defines what a valid invite request looks like, and that makes "owner" impossible to request:
+
+```ts
+// src/lib/schemas.ts
+import { z } from "zod";
+
+export const InviteInput = z.object({
+  email: z.string().trim().toLowerCase().email(),
+  role: z.enum(["member", "admin"]).default("member"), // nobody becomes "owner" by invite
+});
+export type InviteInput = z.infer<typeof InviteInput>;
+```
+
+**Step 3: pull the rules into a service.** The service says what it needs (a repo and a mailer) as interfaces, and contains every business rule in plain sight. It doesn't know about HTTP, Supabase, or Resend:
+
+```ts
+// src/lib/errors.ts
+export class AppError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+```
+
+```ts
+// src/services/inviteService.ts  (business logic: no HTTP, no SDKs, no SQL)
+import { randomBytes } from "node:crypto";
+import { AppError } from "../lib/errors";
+import type { InviteInput } from "../lib/schemas";
+
+export const FREE_PLAN_SEAT_LIMIT = 3;
+
+type Role = "owner" | "admin" | "member";
+
+export interface InviteRepo {
+  getTeam(teamId: string): Promise<{ id: string; name: string; plan: "free" | "pro" } | null>;
+  getRole(teamId: string, userId: string): Promise<Role | null>;
+  countSeats(teamId: string): Promise<number>; // members + pending invites
+  findPendingInvite(teamId: string, email: string): Promise<{ id: string } | null>;
+  createInvite(invite: {
+    teamId: string; email: string; role: Role; token: string; invitedBy: string;
+  }): Promise<{ id: string }>;
+}
+
+export interface Mailer {
+  sendInvite(to: string, teamName: string, token: string): Promise<void>;
+}
+
+export async function inviteTeammate(
+  deps: { repo: InviteRepo; mailer: Mailer },
+  actor: { id: string },
+  teamId: string,
+  input: InviteInput,
+): Promise<{ inviteId: string; alreadyInvited: boolean }> {
+  const { repo, mailer } = deps;
+
+  const team = await repo.getTeam(teamId);
+  if (!team) throw new AppError(404, "team_not_found", "Team not found.");
+
+  const actorRole = await repo.getRole(teamId, actor.id);
+  if (actorRole !== "owner" && actorRole !== "admin") {
+    throw new AppError(403, "forbidden", "Only owners and admins can invite people.");
+  }
+  if (input.role === "admin" && actorRole !== "owner") {
+    throw new AppError(403, "forbidden", "Only owners can invite admins.");
+  }
+
+  const existing = await repo.findPendingInvite(teamId, input.email);
+  if (existing) return { inviteId: existing.id, alreadyInvited: true };
+
+  if (team.plan === "free" && (await repo.countSeats(teamId)) >= FREE_PLAN_SEAT_LIMIT) {
+    throw new AppError(402, "seat_limit",
+      `Free teams can have up to ${FREE_PLAN_SEAT_LIMIT} people. Upgrade to invite more.`);
+  }
+
+  const token = randomBytes(32).toString("hex");
+  const invite = await repo.createInvite({
+    teamId, email: input.email, role: input.role, token, invitedBy: actor.id,
+  });
+  await mailer.sendInvite(input.email, team.name, token);
+  return { inviteId: invite.id, alreadyInvited: false };
+}
+```
+
+Read it top to bottom and you can see every rule your business has about invites. That's the point.
+
+**Step 4: move the database code into a repo.** This is the only file that knows table names:
+
+```ts
+// src/repos/inviteRepo.ts  (data access: the only file here that knows table names)
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { InviteRepo } from "../services/inviteService";
+
+export function makeInviteRepo(db: SupabaseClient): InviteRepo {
+  return {
+    async getTeam(teamId) {
+      const { data, error } = await db.from("teams").select("id, name, plan").eq("id", teamId).maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    async getRole(teamId, userId) {
+      const { data, error } = await db.from("team_members").select("role")
+        .eq("team_id", teamId).eq("user_id", userId).maybeSingle();
+      if (error) throw error;
+      return data?.role ?? null;
+    },
+    async countSeats(teamId) {
+      const members = await db.from("team_members").select("*", { count: "exact", head: true }).eq("team_id", teamId);
+      const pending = await db.from("invites").select("*", { count: "exact", head: true })
+        .eq("team_id", teamId).eq("status", "pending");
+      if (members.error) throw members.error;
+      if (pending.error) throw pending.error;
+      return (members.count ?? 0) + (pending.count ?? 0);
+    },
+    async findPendingInvite(teamId, email) {
+      const { data, error } = await db.from("invites").select("id")
+        .eq("team_id", teamId).eq("email", email).eq("status", "pending").maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    async createInvite(invite) {
+      const { data, error } = await db.from("invites").insert({
+        team_id: invite.teamId, email: invite.email, role: invite.role,
+        token: invite.token, invited_by: invite.invitedBy, status: "pending",
+      }).select("id").single();
+      if (error) throw error;
+      return data;
+    },
+  };
+}
+```
+
+**Step 5: the route becomes a thin adapter** between HTTP and the service:
+
+```ts
+// src/app/api/teams/[teamId]/invites/route.ts  (AFTER: the API layer only)
+import { NextResponse } from "next/server";
+import { requireUser } from "@/lib/auth";
+import { InviteInput } from "@/lib/schemas";
+import { inviteDeps } from "@/lib/providers";      // real repo + real mailer
+import { toErrorResponse } from "@/lib/errors";    // AppError → its status, ZodError → 400, else logged 500
+import { inviteTeammate } from "@/services/inviteService";
+
+export async function POST(req: Request, { params }: { params: Promise<{ teamId: string }> }) {
+  try {
+    const { teamId } = await params;
+    const user = await requireUser(req);
+    const input = InviteInput.parse(await req.json());
+    const result = await inviteTeammate(inviteDeps(), user, teamId, input);
+    return NextResponse.json(result, { status: result.alreadyInvited ? 200 : 201 });
+  } catch (err) {
+    return toErrorResponse(err);
+  }
+}
+```
+
+**Step 6: test the rules without any infrastructure.** Because the service takes its dependencies as arguments, the tests hand it in-memory fakes. They run in milliseconds and cover every problem from the review:
+
+```ts
+// src/services/inviteService.test.ts  (no database, no email provider, no network)
+import { describe, expect, it } from "vitest";
+import { inviteTeammate, type InviteRepo, type Mailer } from "./inviteService";
+import { InviteInput } from "../lib/schemas";
+
+function setup({ plan = "free" as "free" | "pro", seats = 1, pendingEmails = [] as string[] } = {}) {
+  const sent: string[] = [];
+  const roles: Record<string, "owner" | "admin" | "member"> = { u_owner: "owner", u_admin: "admin", u_member: "member" };
+  const repo: InviteRepo = {
+    getTeam: async (id) => (id === "t_1" ? { id, name: "Acme", plan } : null),
+    getRole: async (_teamId, userId) => roles[userId] ?? null,
+    countSeats: async () => seats + pendingEmails.length,
+    findPendingInvite: async (_teamId, email) => (pendingEmails.includes(email) ? { id: "inv_old" } : null),
+    createInvite: async () => ({ id: "inv_new" }),
+  };
+  const mailer: Mailer = { sendInvite: async (to) => { sent.push(to); } };
+  return { deps: { repo, mailer }, sent };
+}
+
+const input = (raw: unknown) => InviteInput.parse(raw);
+
+describe("inviteTeammate", () => {
+  it("lets an admin invite a member, normalizing the email", async () => {
+    const { deps, sent } = setup();
+    const result = await inviteTeammate(deps, { id: "u_admin" }, "t_1", input({ email: "  Sam@Example.COM " }));
+    expect(result).toEqual({ inviteId: "inv_new", alreadyInvited: false });
+    expect(sent).toEqual(["sam@example.com"]);
+  });
+
+  it("refuses invites from regular members", async () => {
+    const { deps } = setup();
+    await expect(inviteTeammate(deps, { id: "u_member" }, "t_1", input({ email: "a@b.co" })))
+      .rejects.toMatchObject({ status: 403 });
+  });
+
+  it("only owners can invite admins", async () => {
+    const { deps } = setup();
+    await expect(inviteTeammate(deps, { id: "u_admin" }, "t_1", input({ email: "a@b.co", role: "admin" })))
+      .rejects.toMatchObject({ status: 403 });
+  });
+
+  it("counts pending invites toward the free-plan limit", async () => {
+    const { deps, sent } = setup({ seats: 1, pendingEmails: ["x@b.co", "y@b.co"] });
+    await expect(inviteTeammate(deps, { id: "u_owner" }, "t_1", input({ email: "z@b.co" })))
+      .rejects.toMatchObject({ status: 402, code: "seat_limit" });
+    expect(sent).toEqual([]);
+  });
+
+  it("doesn't create or email a duplicate when someone is already invited", async () => {
+    const { deps, sent } = setup({ pendingEmails: ["sam@example.com"] });
+    const result = await inviteTeammate(deps, { id: "u_owner" }, "t_1", input({ email: "SAM@example.com" }));
+    expect(result).toEqual({ inviteId: "inv_old", alreadyInvited: true });
+    expect(sent).toEqual([]);
+  });
+
+  it("the schema rejects attempts to invite someone as owner", () => {
+    expect(InviteInput.safeParse({ email: "a@b.co", role: "owner" }).success).toBe(false);
+  });
+});
+```
+
+Two honest caveats. First, "check for an existing invite, then insert" is still a check-then-act race if someone double-clicks fast enough; the real backstop is a unique index on pending invites per team and email (see [Module 7](07-data-modeling.md)), which makes the duplicate insert fail at the database. Second, sending email inline means a slow email provider makes the request slow; once that matters, the service records the invite and a background job sends the email ([Module 6](06-observability.md)). Both changes now touch exactly one file each. Before the refactor, they'd have meant editing the 40-line blob and hoping.
+
+### 14. Client state vs. server state in React
+
+A huge share of the React bugs AI produces come from one confusion: treating data that **lives on the server** as if it lived in the component. There are two different kinds of state:
+
+- **Server state**: projects, invoices, the user's plan, anything stored in your database. The server is the source of truth. The browser only has a *copy*, which can be stale the moment it arrives.
+- **Client (UI) state**: which tab is open, what's typed in the search box, whether the modal is showing. It lives only in the browser, and nobody else cares about it.
+
+Here's the AI-default version, with three classic bugs:
+
+```tsx
+// BAD
+function ProjectsPage() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+  const filters = { status: "active" };
+
+  useEffect(() => {
+    fetch(`/api/projects?status=${filters.status}`).then((r) => r.json()).then(setProjects);
+  }, [filters]); // (1) a new object every render → effect runs → setProjects → re-render → forever
+
+  // (2) the plan decided in the browser (and editable in DevTools)
+  const isPro = user?.plan === "pro" || localStorage.getItem("pro") === "true";
+
+  async function rename(id: string, name: string) {
+    await fetch(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
+    // (3) update the local copy whether or not the server accepted the change
+    setProjects((ps) => ps.map((p) => (p.id === id ? { ...p, name } : p)));
+  }
+  // ...
+}
+```
+
+What these look like in real life: (1) is the "why is our API getting 40 requests a second from one tab?" bill, and it can quietly burn through a usage-based database plan. (2) is a free user getting Pro features by typing one line in the console (and if the server doesn't also check, getting them for real; see section 3). (3) is a user who renames a project, sees the new name, refreshes, and finds the old one, because the server rejected the change with a 403 nobody looked at. Support ticket: "your app loses my changes."
+
+**Good option A: fetch on the server.** With the Next.js App Router, a Server Component can load the data directly through your service layer. No effect, no copy, no loading spinner logic:
+
+```tsx
+// src/app/projects/page.tsx (a Server Component: runs on the server for each request)
+import { requireUser } from "@/lib/auth";
+import { listProjects } from "@/services/projectService";
+import { ProjectList } from "@/components/ProjectList";
+
+export default async function ProjectsPage() {
+  const user = await requireUser();
+  const projects = await listProjects(user, { status: "active" });
+  // canExport only decides whether to SHOW the button; the export route checks the plan again
+  return <ProjectList projects={projects} canExport={user.plan === "pro"} />;
+}
+```
+
+**Good option B: a server-state library in the client.** When you need data in a client component (filters, live updates), use a library built for server state, such as [TanStack Query](https://tanstack.com/query/latest). It handles caching, refetching, loading and error states, and it re-reads the truth after you change something:
+
+```tsx
+"use client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+
+export function Projects() {
+  const [status, setStatus] = useState("active");   // UI state: lives here
+  const queryClient = useQueryClient();
+
+  const { data: projects, isPending, error } = useQuery({
+    queryKey: ["projects", status],                  // server state: cached per filter
+    queryFn: async (): Promise<Project[]> => {
+      const res = await fetch(`/api/projects?status=${status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+  });
+
+  const rename = useMutation({
+    mutationFn: async ({ id, name }: { id: string; name: string }) => {
+      const res = await fetch(`/api/projects/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`); // surfaces the 403 instead of hiding it
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects"] }), // re-read the truth
+  });
+  // render: status filter, loading/error states, list, rename.error message...
+}
+```
+
+The rule of thumb to put in your `AGENTS.md`: "Server data is fetched in Server Components or with TanStack Query. Never copy server data into `useState`. `useState` is for UI state only. Plan and permission checks happen on the server; the client only uses them to show or hide things."
+
+### 15. How an app grows: 1 to 10,000 users
+
+*(Illustrative composite. The numbers are typical orders of magnitude, not benchmarks.)* Architecture advice feels abstract until you see *when* each piece starts to matter. Here's the life of a typical vibe-coded SaaS, like Nadia's project tool after the cleanup:
+
+| Stage | Users | What breaks first | The architectural fix |
+|---|---|---|---|
+| Prototype | 1-10 (you and friends) | Nothing. Everything is fast with tiny data. | None needed. But keeping layers now makes every later row cheaper. |
+| First customers | 10-100 | A pricing bug fixed in one place still exists in two others. A free user finds the Pro feature via DevTools. | One source of truth per rule (section 5); server-side checks (section 3). |
+| Word of mouth | 100-1,000 | The projects page takes 3 seconds for power users (N+1 queries, [Module 3](03-reading-code.md)). The invite email provider has a 20-second outage and signups hang. | Queries live in repos, so you fix N+1 in one file and add indexes. Slow external calls move to background jobs. |
+| Real business | 1,000-5,000 | A Stripe API change breaks checkout in the 11 files that imported the SDK. The AI can't hold the dashboard in context anymore. | Third-party SDKs behind wrappers (section 12); file size limits and a rules file (section 8). |
+| Growing team | 5,000-10,000 | A hired developer breaks billing on day three because nothing explains the rules. Deploys get scary. | ADRs (section 10), tests on the service layer ([Module 4](04-testing.md)), staging and safe deploys ([Module 8](08-deployment.md)). |
+
+Two things to notice. First, almost nothing on this list is about *scale* in the "we need Kubernetes" sense. A single well-structured app on one Postgres database comfortably handles 10,000 users for most SaaS products. What breaks is **change**: the cost of making the next change safely. Second, every fix in the right column is cheap if the layers already exist, and a multi-week rewrite if they don't. That's the whole argument for this module in one table.
 
 ---
 
@@ -675,4 +1068,4 @@ List every rule in your app involving money, access, or limits. For each, find w
 
 ---
 
-**Next up:** [Module 6: Error Handling & Observability](06-observability.md)
+**Next up:** [Module 6: Error Handling & Observability](06-observability.md) · [Back to course outline](../course-outline.md)

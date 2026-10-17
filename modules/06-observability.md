@@ -27,10 +27,9 @@ By the end of this module you will be able to:
 ---
 
 ## Vibe Fail: The Signup Form That Thanked Everyone
+*Illustrative composite.*
 
-*(Illustrative story, assembled from very common patterns.)*
-
-Leo launched a waitlist for his AI writing tool. He posted it on a few forums, the signups rolled in, and the counter on his landing page climbed past 2,000. He was thrilled.
+Omar launched a waitlist for his AI writing tool. He posted it on a few forums, the signups rolled in, and the counter on his landing page climbed past 2,000. He was thrilled.
 
 A month later he went to email the waitlist. The database had 312 rows.
 
@@ -50,7 +49,7 @@ async function handleSignup(email) {
 
 The comment said "ignore duplicate errors." The code ignored **all** errors. A few days after launch, the database's free tier connection limit started rejecting inserts during traffic spikes. Every failure was silently swallowed, the counter still went up, and every user still saw "Thanks!" Nothing was logged. No alert fired. No error tracker existed.
 
-Leo lost about 85% of his launch signups, and he couldn't even email them to apologize, because he didn't have their addresses. The fix would have been four lines of error handling and a free error-tracking account.
+Omar lost about 85% of his launch signups, and he couldn't even email them to apologize, because he didn't have their addresses. The fix would have been four lines of error handling and a free error-tracking account.
 
 ---
 
@@ -306,7 +305,7 @@ Hard truth: if you can't explain *why* the fix works, you haven't fixed the bug.
 
 ### 10. Request IDs, end to end
 
-"Use request IDs" is easy advice. Here's what it looks like wired up, in a small Express app (the same idea applies to Next.js middleware, FastAPI middleware, or any framework). This code runs as shown:
+"Use request IDs" is easy advice. Here's what it looks like wired up, in a small Express app (the same idea applies to Next.js middleware, FastAPI middleware, or any framework):
 
 ```js
 // server.js — request IDs flowing through every log line
@@ -414,8 +413,8 @@ The failure mode after "no alerts" is "so many alerts that none of them mean any
 How to keep alerts meaningful:
 
 - **Every alert must have an action.** If the honest response is "huh, okay," it's not an alert. Turn it into a dashboard item or a weekly report.
-- **Alert on symptoms, not causes.** "Checkout error rate above 5% for 10 minutes" (users are hurting) beats "CPU above 80%" (maybe nothing is wrong).
-- **Use durations.** A single failed request isn't an incident. Sustained failure for 5 to 10 minutes is.
+- **Alert on symptoms, not causes.** "Checkout error rate above 5% for 5 minutes" (users are hurting) beats "CPU above 80%" (maybe nothing is wrong).
+- **Use durations.** A single failed request isn't an incident. Five minutes of sustained failure is.
 - **Two severities are enough for a small app.** *Page* (wake me up: site down, payments failing, data at risk) and *ticket* (look at it today: disk filling, a new low-volume error type). Route them differently.
 - **Group and deduplicate.** Error trackers group identical exceptions; make sure you're notified on *new* issues and *regressions*, not on every occurrence.
 - **Review monthly.** For each alert that fired: was it real, did someone act, was it fast enough? Delete or tune the noisy ones. Add one for any incident that no alert caught.
@@ -460,6 +459,322 @@ Setup order if you're starting from nothing: error tracker → structured loggin
 **7. Confirm.** After deploy, the issue stays quiet in the error tracker; checkout success rate returns to normal. Reply to the three customers.
 
 Total time: about 40 minutes, most of it spent *reading*, not changing. Notice that the AI was useful at step 3 ("explain what this commit changed in the product query") and step 6 ("write a test for this scenario"), as a tool working from evidence instead of an oracle guessing in the dark.
+
+### 15. Designing error responses: problem details (RFC 9457)
+
+Section 2 said "generic message plus an error ID." Here's how to make that consistent across a whole API, so your frontend, your logs, and any API customers all know what an error looks like. There's a standard for it: [RFC 9457, Problem Details for HTTP APIs](https://www.rfc-editor.org/rfc/rfc9457.html) (2023, replacing RFC 7807). An error response uses the media type `application/problem+json` and these fields:
+
+- `type`: a URL identifying the kind of problem (it can point to a docs page), or `about:blank` for a plain HTTP error
+- `title`: a short, human-readable summary of that kind of problem
+- `status`: the HTTP status code
+- `detail`: an explanation specific to this occurrence
+- `instance`: which request or resource it happened on
+- plus any extra fields you need (`errors` for field validation, `errorId` for support)
+
+Compare what AI-generated APIs typically return across five endpoints:
+
+```text
+{ "error": "bad email" }                   ← 400
+{ "message": "Forbidden", "ok": false }    ← 200 (!)
+{ "err": { "code": "P2002", "meta": ... } } ← 500, Prisma internals leaked
+"Something went wrong"                     ← 500, plain text
+{ "success": false, "reason": "upgrade" }  ← 402
+```
+
+Five shapes means the frontend needs five parsing branches, and one of them hides a failure behind a 200. Here's one central handler that makes every error look the same, in Express:
+
+```js
+// problems.js — every error response follows RFC 9457 "problem details"
+import { randomUUID } from "node:crypto";
+
+const TYPE_BASE = "https://example.com/problems/"; // each type URL can be a docs page
+
+export class HttpProblem extends Error {
+  constructor(status, slug, title, detail, extra = {}) {
+    super(detail);
+    Object.assign(this, { status, slug, title, detail, extra });
+  }
+}
+
+export const problem = {
+  validation: (errors) =>
+    new HttpProblem(422, "validation-error", "Your request has invalid fields.",
+      "Fix the fields listed in errors and try again.", { errors }),
+  notFound: (what) =>
+    new HttpProblem(404, "not-found", "Not found.", `${what} doesn't exist or you can't access it.`),
+  outOfStock: (productIds) =>
+    new HttpProblem(409, "out-of-stock", "Some items are no longer available.",
+      "Remove the unavailable items from your cart and try again.", { productIds }),
+};
+
+export function problemHandler(logger) {
+  // Express recognizes error handlers by their four arguments
+  return (err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    const known = err instanceof HttpProblem;
+    const status = known ? err.status : 500;
+    const errorId = randomUUID();
+
+    if (status >= 500) logger.error({ err, errorId, reqId: req.id, path: req.originalUrl }, "unhandled error");
+    else logger.warn({ errorId, reqId: req.id, status, type: err.slug }, "request rejected");
+
+    res.status(status).type("application/problem+json").json({
+      type: known ? TYPE_BASE + err.slug : "about:blank",
+      title: known ? err.title : "Internal Server Error",
+      status,
+      detail: known ? err.detail
+        : "Something went wrong on our side. Try again, and contact support with the error ID if it keeps happening.",
+      instance: req.originalUrl,
+      errorId,
+      ...(known ? err.extra : {}),
+    });
+  };
+}
+```
+
+```js
+// app.js
+import express from "express";
+import pino from "pino";
+import { problem, problemHandler } from "./problems.js";
+
+const logger = pino();
+const app = express();
+app.use(express.json());
+
+const products = new Map([["p_100", { id: "p_100", inStock: true }], ["p_221", { id: "p_221", inStock: false }]]);
+
+app.post("/api/orders", async (req, res) => {
+  const { items } = req.body ?? {};
+  if (!Array.isArray(items) || items.length === 0) {
+    throw problem.validation([{ field: "items", message: "Add at least one item." }]);
+  }
+  const unavailable = items.filter((i) => !products.get(i.productId)?.inStock).map((i) => i.productId);
+  if (unavailable.length) throw problem.outOfStock(unavailable);
+  res.status(201).json({ orderId: "ord_1" });
+});
+
+app.get("/api/boom", async () => {
+  throw new Error("connect ECONNREFUSED 10.0.0.5:5432"); // a real internal error: never shown to users
+});
+
+app.use(problemHandler(logger)); // after all routes; Express 5 forwards async errors here
+app.listen(3000);
+```
+
+What the client actually receives:
+
+```text
+$ curl -i -X POST localhost:3000/api/orders -H 'Content-Type: application/json' \
+    -d '{"items":[{"productId":"p_100"},{"productId":"p_221"}]}'
+HTTP/1.1 409 Conflict
+Content-Type: application/problem+json; charset=utf-8
+
+{"type":"https://example.com/problems/out-of-stock","title":"Some items are no longer available.",
+ "status":409,"detail":"Remove the unavailable items from your cart and try again.",
+ "instance":"/api/orders","errorId":"86f3c5e8-...","productIds":["p_221"]}
+
+$ curl localhost:3000/api/boom
+{"type":"about:blank","title":"Internal Server Error","status":500,
+ "detail":"Something went wrong on our side. Try again, and contact support with the error ID if it keeps happening.",
+ "instance":"/api/boom","errorId":"3edb948e-..."}
+```
+
+Notice what the 500 does *not* contain: `ECONNREFUSED 10.0.0.5:5432`. That string (your database's private IP and port) went to the logs with the same `errorId`, where you can find it. The user gets something useful (the 409 even tells the frontend exactly which product to highlight), and an attacker gets nothing.
+
+### 16. Wiring up Sentry for real
+
+Section 5 described what an error tracker does. Here's the actual setup for the two most common vibe-coded stacks, following [Sentry's current docs](https://docs.sentry.io/platforms/javascript/). (Other trackers look similar.)
+
+**Express (Node).** Sentry needs to load *before* your app code, so it can hook into Express and HTTP. Put the setup in its own file:
+
+```js
+// instrument.js — loaded before anything else so Sentry can hook into Express and HTTP
+import * as Sentry from "@sentry/node";
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,               // from env vars, different per environment
+  environment: process.env.APP_ENV ?? "development",
+  release: process.env.GIT_SHA,              // which deploy introduced the error
+  tracesSampleRate: 0.1,                     // sample 10% of requests for performance data
+  sendDefaultPii: false,                     // don't attach IPs, cookies, or user data automatically
+  beforeSend(event) {
+    // Last line of defense: strip anything that looks like a credential
+    if (event.request?.headers) {
+      delete event.request.headers.authorization;
+      delete event.request.headers.cookie;
+    }
+    return event;
+  },
+});
+```
+
+Start the app with `node --import ./instrument.js app.js` (that's the documented way for ES modules; with CommonJS, `require("./instrument")` on the first line of your app instead). Then register Sentry's error handler after your routes:
+
+```js
+// app.js — start with: node --import ./instrument.js app.js
+import * as Sentry from "@sentry/node";
+import express from "express";
+
+const app = express();
+
+app.get("/api/projects", async (req, res) => {
+  res.json([]);
+});
+
+// After all routes, before any other error middleware:
+Sentry.setupExpressErrorHandler(app);
+
+// Your own handler still decides what the user sees (e.g. the problem+json handler above)
+app.use((err, req, res, next) => {
+  res.status(500).type("application/problem+json").json({
+    type: "about:blank", title: "Internal Server Error", status: 500,
+    errorId: res.sentry, // Sentry's event ID, so support can find the exact error
+  });
+});
+
+app.listen(3000);
+```
+
+By default, Sentry's Express integration reports 5xx errors and skips 3xx and 4xx responses, which is what you want: a user typing a wrong coupon code isn't an incident. See the [Express guide](https://docs.sentry.io/platforms/javascript/guides/express/).
+
+**Next.js.** Run the wizard: `npx @sentry/wizard@latest -i nextjs`. It creates the client config (`instrumentation-client.ts`), server and edge configs, an `instrumentation.ts` file that loads them, and wraps `next.config` with `withSentryConfig` so source maps get uploaded and stack traces point at your real code. Read the files it generates rather than trusting them blindly; check the [Next.js guide](https://docs.sentry.io/platforms/javascript/guides/nextjs/) for the current list, because the file layout has changed across versions.
+
+**The three checks after setup:**
+
+1. **Throw a test error in each environment** and confirm it shows up, tagged with the right environment and release.
+2. **Look at one event's full payload.** Search it for tokens, emails, request bodies. If you see a password field, fix your scrubbing before real users arrive.
+3. **Set up one alert rule** that reaches you (section 7), such as "new issue in production" sent to your phone. Default settings that email a folder you never open don't count.
+
+### 17. Querying your logs: answers in seconds
+
+Structured logs (section 3) pay off when something breaks and you need answers *fast*. Here's a slice of JSON logs, one object per line, the way pino and most loggers write them:
+
+```text
+{"level":30,"time":"2026-10-17T14:02:11.120Z","reqId":"req_7a1","route":"/api/projects","status":200,"durationMs":84,"userId":"u_12","msg":"request completed"}
+{"level":30,"time":"2026-10-17T14:02:11.990Z","reqId":"req_7a3","route":"/api/checkout","msg":"retrying payment intent","attempt":2}
+{"level":50,"time":"2026-10-17T14:02:13.002Z","reqId":"req_7a3","route":"/api/checkout","status":500,"durationMs":3012,"userId":"u_44","errorId":"e_91c","err":{"type":"Error","message":"stripe timeout"},"msg":"checkout failed"}
+{"level":30,"time":"2026-10-17T14:02:13.950Z","reqId":"req_7a4","route":"/api/projects","status":200,"durationMs":2450,"userId":"u_12","msg":"request completed"}
+{"level":50,"time":"2026-10-17T14:02:17.640Z","reqId":"req_7a7","route":"/api/projects","status":500,"durationMs":120,"userId":"u_77","errorId":"e_b13","err":{"type":"TypeError","message":"Cannot read properties of undefined (reading 'name')"},"msg":"list projects failed"}
+```
+
+On your laptop or a server, [`jq`](https://jqlang.org/) answers questions in one line each.
+
+**"What's failing right now?"** All errors, trimmed to the useful fields:
+
+```bash
+jq -c 'select(.level >= 50) | {time, route, errorId, error: .err.message}' app.log
+```
+
+**"A customer emailed error ID `e_91c`."** Find the error, take its `reqId`, then follow that request's whole story:
+
+```bash
+jq -c 'select(.errorId == "e_91c") | .reqId' app.log    # → "req_7a3"
+jq -c 'select(.reqId == "req_7a3")' app.log              # the retry, then the failure
+```
+
+**"Is it one bug or many?"** Group errors by route and message:
+
+```bash
+jq -r 'select(.level >= 50) | "\(.route)  \(.err.message)"' app.log | sort | uniq -c | sort -rn
+```
+
+**"What's slow?"**
+
+```bash
+jq -c 'select(.durationMs > 2000) | {time, route, durationMs}' app.log
+```
+
+**"Error rate per route"** (the number behind your alert):
+
+```bash
+jq -c -s 'map(select(.status)) | group_by(.route)
+  | map({route: .[0].route, requests: length, errors: map(select(.status >= 500)) | length})' app.log
+```
+
+Hosted log tools (your platform's log viewer, Better Stack, Axiom, Datadog, Grafana Loki, and others) have their own query languages, but they express the same questions: *filter by level, filter by request ID, group by route, find the slow ones.* For example, in a Loki-style query, `{app="api"} | json | level >= 50` filters JSON logs by level. Learn the four questions; the syntax is a quick search away. None of it works if your logs are `console.log("here 2")`.
+
+### 18. A gallery of silent failures
+
+The scariest failures don't throw errors anyone sees. They happen in code with no user watching: background jobs, webhooks, and scheduled tasks. *(Each story is an illustrative composite of very common patterns.)*
+
+#### The background job that failed quietly for three weeks
+
+*The story:* Order receipts are sent by a background job. The email provider rotated its API keys; the job's `try/catch` logged "send failed" at debug level and moved on. Three weeks later, a customer's accountant asks why there are no receipts. 1,800 customers never got one, and some of them disputed the charges with their bank because they didn't recognize the charge. Each dispute costs a fee on top of the refund.
+
+*The opposite failure:* a job with infinite retries and no backoff hammers a broken API 50 times a second, gets your account rate-limited, and blocks every other job in the queue.
+
+*The fix:* bounded retries with backoff, then a **dead-letter** state that alerts a human. With [BullMQ](https://docs.bullmq.io/), for example:
+
+```js
+await receiptQueue.add("send-receipt", { orderId }, {
+  attempts: 5,                                       // not 0, not infinite
+  backoff: { type: "exponential", delay: 10_000 },   // 10s, 20s, 40s, 80s...
+});
+
+worker.on("failed", (job, err) => {
+  if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+    logger.error({ err, jobId: job.id, orderId: job.data.orderId }, "receipt permanently failed");
+    Sentry.captureException(err, { tags: { queue: "receipts" } }); // a human hears about it
+  }
+});
+```
+
+Also add a metric on queue depth (jobs waiting). A queue growing for an hour is a symptom users haven't noticed yet.
+
+#### The webhook that said "OK" and did nothing
+
+*The story:* The Stripe webhook handler returns `200` first, *then* updates the database. When the database update throws, Stripe already got its 200 and never retries. The customer paid, and their account still says Free. They email support, angrily, on a Saturday.
+
+*The opposite story:* the handler processes the event, then crashes before responding. Stripe retries (in live mode, for up to three days, per [Stripe's webhook docs](https://docs.stripe.com/webhooks)), and every retry grants another month of credits, because the handler doesn't check whether it already processed that event.
+
+*The fix:* verify the signature (see [Module 2](02-security-vulnerabilities.md) on webhook verification), process *before* responding, return a non-2xx when processing fails so the sender retries, and make processing **idempotent** by recording event IDs:
+
+```js
+app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body, req.headers["stripe-signature"], process.env.STRIPE_WEBHOOK_SECRET);
+  } catch {
+    return res.status(400).send("Invalid signature");
+  }
+
+  // Claim the event ID. A duplicate delivery inserts nothing and is acknowledged.
+  const claimed = await db.query(
+    "INSERT INTO processed_webhooks (event_id) VALUES ($1) ON CONFLICT DO NOTHING", [event.id]);
+  if (claimed.rowCount === 0) return res.sendStatus(200);
+
+  try {
+    await handleStripeEvent(event);       // update the subscription, grant credits, etc.
+    res.sendStatus(200);
+  } catch (err) {
+    await db.query("DELETE FROM processed_webhooks WHERE event_id = $1", [event.id]); // let the retry try again
+    logger.error({ err, eventId: event.id, type: event.type }, "webhook processing failed");
+    res.sendStatus(500);                  // Stripe will retry
+  }
+});
+```
+
+(If your handler's database writes can share one transaction with the `processed_webhooks` insert, that's even cleaner: both commit or neither does.)
+
+#### The cron job that simply stopped
+
+*The story:* A nightly job emails customers their usage report and cleans up expired trials. During a platform migration, the cron schedule doesn't get copied over. Nothing errors, because nothing runs. Six weeks later, finance notices that 300 expired trials are still using Pro features for free.
+
+Error trackers can't catch this: **the absence of a run produces no error.** The fix is a **heartbeat** (also called a dead man's switch): the job pings a monitoring URL when it finishes successfully, and the monitor alerts you when the ping *doesn't* arrive on schedule. Services like [Healthchecks.io](https://healthchecks.io/), Cronitor, Better Stack, and Sentry's cron monitoring all do this:
+
+```js
+async function nightlyJob() {
+  await expireTrials();
+  await sendUsageReports();
+  await fetch(process.env.NIGHTLY_JOB_HEARTBEAT_URL); // only reached if everything above succeeded
+}
+```
+
+Configure the monitor with the expected schedule (daily at 02:00) and a grace period (an hour). Now "the job didn't run" becomes a message on your phone the next morning instead of a finance discovery six weeks later.
+
+**The pattern across all three:** for anything that runs without a user watching, ask "if this stopped working tonight, how would I find out?" If the answer is "a customer would tell me eventually," add the alert now.
 
 ---
 
@@ -606,4 +921,4 @@ Add a `/health` endpoint that checks the database. Point a free uptime monitor a
 
 ---
 
-**Next up:** [Module 7: Data Modeling & Persistence](07-data-modeling.md)
+**Next up:** [Module 7: Data Modeling & Persistence](07-data-modeling.md) · [Back to course outline](../course-outline.md)
