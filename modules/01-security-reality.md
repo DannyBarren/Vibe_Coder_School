@@ -15,7 +15,7 @@ A note on sources: every statistic and incident here links to its source, and th
 By the end of this module you will be able to:
 
 1. Cite the main research on AI-generated code security and describe what it does and doesn't show.
-2. Describe at least five real incidents involving AI-built or AI-operated software and name the root cause of each.
+2. Describe at least five real security incidents involving software built or operated with AI (and the kind of fast-shipped app this course is about) and name the root cause of each.
 3. Explain seven structural reasons AI-generated code tends to be insecure, so you can predict where *your* app is weak.
 4. Explain why "it works" and "it's secure" are different properties that need different evidence.
 5. Run a 30-minute exposure audit on your own app, acting as a logged-out stranger.
@@ -26,7 +26,9 @@ By the end of this module you will be able to:
 
 ---
 
-## Vibe Fail: "But Nobody Knows the URL" *(illustrative composite, not a real event)*
+## Vibe Fail: "But Nobody Knows the URL"
+*Illustrative composite.*
+
 
 Marcus runs a small fitness-coaching business. He vibe-codes a client portal over two evenings: clients log in, see their workout plans, upload progress photos, and message him. The AI wires it all up with a hosted database and file storage. Everything works. Clients love it.
 
@@ -60,7 +62,7 @@ What they found:
 
 That last point matters a lot. The comforting story is "the models will get better, so this solves itself." Veracode's data says the models improved at *working* code while security stood still.
 
-**The October 2025 update** tested newer models on the same benchmark. Most still landed between **50% and 59%** secure. The best performers (OpenAI's GPT-5 reasoning models) reached about **70–72%**, which still means insecure choices in **roughly 28–30%** of cases. Veracode's conclusion: organizations "cannot rely on AI-generated code to be secure by default." ([Veracode October update](https://www.veracode.com/blog/ai-code-security-october-update/), [SC Media](https://www.scworld.com/news/openais-gpt-5-generates-more-secure-code-than-past-models-report-finds))
+**In an update published November 18, 2025** (which Veracode titled its *October 2025 Update*), researchers re-ran newer models on the same benchmark. Most still landed between **50% and 59%** secure. The best performers (OpenAI's GPT-5 reasoning models) reached about **70–72%**, which still means insecure choices in **roughly 28–30%** of cases. Veracode's conclusion: organizations "cannot rely on AI-generated code to be secure by default." ([Veracode October update](https://www.veracode.com/blog/ai-code-security-october-update/), [SC Media](https://www.scworld.com/news/openais-gpt-5-generates-more-secure-code-than-past-models-report-finds))
 
 **What this does and doesn't show.** It's a benchmark of single code-completion tasks, not a scan of full production apps, and it covers four vulnerability types. It doesn't say 45% of your *app* is broken. It says that **when the AI faces a choice between a safe and an unsafe way to write something, it picks the unsafe one often enough that you should assume every security-relevant line needs checking.** That's the right mental model.
 
@@ -109,11 +111,11 @@ In a study that won a Distinguished Paper award at **USENIX Security 2025**, res
 - That included **205,474 unique made-up package names.**
 - Commercial models hallucinated packages at an average of **at least 5.2%**; open-source models at **21.7%**.
 
-Why does that matter? Because an attacker can *register* a name the AI keeps inventing and fill it with malware. That attack is now called **slopsquatting** (Module 2 covers it). It's not hypothetical. In a 2023–24 experiment, security researcher Bar Lanyado registered a package name that AI models kept hallucinating (`huggingface-cli`), as an empty, harmless package. It got **more than 30,000 downloads in three months**, and the fake install command even turned up in the README of a real Alibaba repository. ([The Register](https://www.theregister.com/security/2024/03/28/ai-bots-hallucinate-software-packages-and-devs-download-them/858011))
+Why does that matter? Because an attacker can *register* a name the AI keeps inventing and fill it with malware. That attack is now called **slopsquatting** (Module 2 covers it). It's not hypothetical. In a 2023–24 experiment, security researcher Bar Lanyado registered a package name that AI models kept hallucinating (`huggingface-cli`), as an empty, harmless package. It got **more than 15,000 authentic downloads in three months**, and the fake install command even turned up in the README of a real Alibaba repository. ([The Register](https://www.theregister.com/security/2024/03/28/ai-bots-hallucinate-software-packages-and-devs-download-them/858011))
 
 ### 1.6 What the industry lists as the top risks
 
-The **OWASP Top 10:2025**, the standard reference for web application risk, puts these at the top ([OWASP](https://owasp.org/Top10/2025/)):
+The **OWASP Top 10:2025**, the standard reference for web application risk, puts these at the top ([OWASP](https://top10.owasp.org/2025/)):
 
 1. **A01 Broken Access Control**
 2. **A02 Security Misconfiguration**
@@ -166,7 +168,7 @@ Wiz's summary of the root cause: "a single Supabase configuration setting." One 
 
 ### 2.3 Tea: 72,000 images from a "secure" safety app
 
-**What happened.** In July 2025, Tea, a women-only dating-safety app that required users to submit **selfies and photo IDs** for verification, confirmed a breach. Images had been stored in a **Firebase storage bucket that was publicly accessible**. The bucket's URL was **inside the Android app's code**, and 404 Media confirmed this by decompiling the app. About **72,000 images** were exposed, including roughly **13,000 verification selfies and photo IDs** and **59,000 images** from posts, comments, and direct messages. Users posted scripts to bulk-download them. ([Reuters](https://www.reuters.com/sustainability/boards-policy-regulation/womens-dating-app-tea-reports-72000-images-stolen-security-breach-2025-07-26/), [Engadget / 404 Media](https://www.engadget.com/cybersecurity/tea-app-suffers-breach-exposing-thousands-of-user-images-190731414.html), [BBC](https://www.bbc.com/news/articles/c7vl57n74pqo))
+**What happened.** In July 2025, Tea, a women-only dating-safety app that required users to submit **selfies and photo IDs** for verification, confirmed a breach. Images had been stored in a **Firebase storage bucket that was publicly accessible**. The bucket's URL was **inside the Android app's code**, and 404 Media confirmed this by decompiling the app. About **72,000 images** were exposed, including roughly **13,000 verification selfies and photo IDs** and **59,000 images** from posts, comments, and direct messages. Users posted scripts to bulk-download them, and the leaked data was posted to **4chan**, which is where the breach first came to light. ([Reuters](https://www.reuters.com/sustainability/boards-policy-regulation/womens-dating-app-tea-reports-72000-images-stolen-security-breach-2025-07-26/), [Engadget / 404 Media](https://www.engadget.com/cybersecurity/tea-app-suffers-breach-exposing-thousands-of-user-images-190731414.html), [BBC](https://www.bbc.com/news/articles/c7vl57n74pqo))
 
 It got worse. A researcher then found a **second exposure** reportedly containing about **1.1 million private messages**, some on extremely sensitive topics. ([BleepingComputer](https://www.bleepingcomputer.com/news/security/tea-app-leak-worsens-with-second-database-exposing-user-chats/)) The BBC also noted that Tea's privacy policy had promised verification images would be "deleted immediately." They weren't.
 
@@ -182,7 +184,7 @@ It got worse. A researcher then found a **second exposure** reportedly containin
 
 ### 2.5 Replit and SaaStr: the agent that deleted production during a code freeze
 
-**What happened.** In July 2025, SaaStr founder Jason Lemkin was nine days into a public vibe-coding experiment on Replit, building a front end for a database of business contacts. He had told the AI agent to **freeze** the code and make no changes. The agent then **deleted the production database**, which held records for **1,206 executives and more than 1,196 companies**. Asked about it, the agent admitted to a "catastrophic error in judgment" and said it had "panicked." It also told Lemkin that **rollback was impossible**, which turned out to be **false**: he restored the data with Replit's rollback feature. Earlier in the experiment, Lemkin had also complained that the agent covered up bugs with fake data and fake reports. ([The Register](https://www.theregister.com/software/2025/07/21/vibe-coding-service-replit-deleted-production-database/719783), [Fast Company](https://www.fastcompany.com/91372483/replit-ceo-what-really-happened-when-ai-agent-wiped-jason-lemkins-database-exclusive), [Lemkin's thread](https://twitter-thread.com/t/1946239068691665187))
+**What happened.** In July 2025, SaaStr founder Jason Lemkin was nine days into a public vibe-coding experiment on Replit, building a front end for a database of business contacts. He had told the AI agent to **freeze** the code and make no changes. The agent then **deleted the production database**, which, by Lemkin’s own account (he posted the agent’s messages and screenshots), held records for **1,206 executives and more than 1,196 companies**. Asked about it, the agent admitted to a "catastrophic error in judgment" and said it had "panicked." It also told Lemkin that **rollback was impossible**, which turned out to be **false**: he restored the data with Replit's rollback feature. Earlier in the experiment, Lemkin had also complained that the agent covered up bugs with fake data and fake reports. ([The Register](https://www.theregister.com/software/2025/07/21/vibe-coding-service-replit-deleted-production-database/719783), [Fast Company](https://www.fastcompany.com/91372483/replit-ceo-what-really-happened-when-ai-agent-wiped-jason-lemkins-database-exclusive), [Lemkin's thread](https://twitter-thread.com/t/1946239068691665187))
 
 Replit's response is the actual lesson. Within days, it shipped **automatic separation of development and production databases**, so the agent can no longer touch production during development, and it publicly acknowledged that, before this change, development work could affect the live app. ([Replit blog](https://replit.com/blog/doubling-down-on-our-commitment-to-secure-vibe-coding))
 
@@ -255,6 +257,25 @@ This one had no attacker at all. Sources: Lemkin's posts ([Day 8](https://twitte
 **The single control that would have stopped it:** **the agent never holding production credentials**, which is dev/prod separation. Replit shipped exactly this within days, which tells you how fundamental it is. Backups and tested rollback are what turned a catastrophe into a scare, so they're the *second* control.
 
 **The pattern across both:** neither incident needed new technology to prevent it. Each needed one boring, well-known control, applied *and verified*.
+
+### 2.10 What a breach actually costs
+
+The incidents above are embarrassing. They're also expensive, and the bill is well documented. IBM's **Cost of a Data Breach Report 2025**, based on real breaches at **600 organizations** between March 2024 and February 2025, is the standard reference ([IBM report](https://www.ibm.com/reports/data-breach), [IBM newsroom](https://newsroom.ibm.com/2025-07-30-ibm-report-13-of-organizations-reported-breaches-of-ai-models-or-applications,-97-of-which-reported-lacking-proper-ai-access-controls)):
+
+- **The global average breach cost $4.44 million.** In the United States it was **$10.22 million**, a record.
+- **Healthcare was the most expensive industry at $7.42 million** per breach, the kind of number that ends a small company.
+- **Breaches took 241 days** on average to identify and contain. That's eight months during which the attacker (and sometimes nobody else) knows.
+- **Detecting the breach yourself, rather than from an attacker or a stranger, saved about $900,000.** Remember Priya and Marcus finding out by email: that's the expensive way.
+- On AI specifically: **97% of organizations that reported an AI-related breach lacked proper AI access controls.** "Shadow AI" (unsanctioned AI tools) was involved in **20% of breaches**, and heavy shadow-AI use added about **$670,000** to the average cost.
+
+Those are big-company averages, and your weekend app is not a hospital. But the *structure* of the cost scales down to you in forms that are just as real:
+
+- **Legal exposure.** After the Tea breach, by **August 5, 2025** at least **10 potential class-action lawsuits** had been filed, which legal reporting noted "could result in tens of millions of dollars in damages." The first breach was disclosed July 25; the first suit landed July 28. They were later consolidated as *In re Tea Dating Advice Data Breach Litigation* (N.D. Cal.). ([NBC News](https://www.nbcnews.com/tech/social-media/10-women-sued-tea-app-photos-hacked-leaked-online-rcna222880))
+- **The clean-up is worse than the build.** Moltbook's fix "took several rounds," because each patch revealed another exposed table ([Module 1, §2.2](#22-moltbook-15-million-api-keys-one-missing-setting)). You don't get to fix a breach once.
+- **Rotation and notification.** Every leaked key must be rotated, every affected user told, and in many places that notification is legally required and time-bound.
+- **Reputation.** "The dating-safety app that leaked women's IDs" is now the first thing anyone reads about Tea. That doesn't rotate out like a key.
+
+Put the number next to the effort it would have taken to prevent it. The Lovable and Moltbook breaches were one correct RLS policy away. That's roughly twenty lines of SQL and one `curl` check (Module 2) versus a seven-figure average and a lawsuit. This is the best return on investment in software.
 
 ---
 
@@ -372,7 +393,7 @@ These were demonstrations on test data, not reported breaches. They're in this m
 - [ ] **Commit before every agent session**, and keep tested backups of anything the agent can touch.
 - [ ] **Log what agents do.** If something goes wrong, you need to know which commands ran and which tools were called.
 
-The MCP specification itself includes security best-practice guidance for server and client implementers, worth reading if you build or self-host MCP servers ([MCP spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/security_best_practices)).
+The MCP specification itself includes security best-practice guidance for server and client implementers, worth reading if you build or self-host MCP servers ([MCP spec](https://modelcontextprotocol.io/docs/2025-11-25/tutorials/security/security_best_practices)).
 
 ### 5.5 Prompt template: audit your agent setup
 
@@ -524,6 +545,65 @@ specific code or policy that makes it so. If you are unsure, say so.
 
 The last paragraph matters. You're explicitly turning off the model's urge to be agreeable. Remember Reason 6: still **verify** what it tells you.
 
+
+## See It Yourself: Look at Your App the Way an Attacker Does
+
+Everything above is abstract until you watch it happen. This is a guided walkthrough of the exact three moves that opened up Lovable, Moltbook, and the dog-groomer portal. It takes about ten minutes, needs no special tools, and the only skill required is "can press F12." The example below uses a made-up Supabase-backed app, `app.example.com`, so you can follow along before pointing the same moves at your own project in the exercise. **Do this only on apps you own.**
+
+The attacker's whole mindset is one sentence: *the browser is not a locked door, it's a glass wall with the keys taped to it.* Here's how they read the keys.
+
+### Move 1: Find the keys in the bundle (2 min)
+
+Your frontend has to talk to your backend, so it has to carry the address and the public key to get there. That code ships to every visitor. Open the app, press **F12**, go to the **Sources** tab (or **Debugger** in Firefox), and use the global search (Ctrl/Cmd-Shift-F) for `supabase`, `apiKey`, `firebaseConfig`, `sk_`, `https://`.
+
+In a Supabase app you'll find something like this sitting in the JavaScript:
+
+```js
+const supabaseUrl = "https://abcdefghijklmnop.supabase.co";
+const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...";  // the "anon" key
+```
+
+Paste the key's middle section into any JWT decoder (or just split it on `.` and base64-decode the second part). You'll see its claims in plain text:
+
+```json
+{ "iss": "supabase", "ref": "abcdefghijklmnop", "role": "anon", "exp": 2015576000 }
+```
+
+**This is working as designed.** The Supabase `anon` key (and its newer replacement, the `sb_publishable_...` key) is *meant* to be public. A Firebase web config is the same. The attacker isn't excited that they found the key. They're excited to find out what it can **do**, which depends entirely on your access rules. If those are missing, the public key is a master key.
+
+### Move 2: Replay a data request as a stranger (4 min)
+
+Go to the **Network** tab, reload while logged in, and watch the requests. A Supabase data call looks like `https://abcdefghijklmnop.supabase.co/rest/v1/bookings?select=*`. Right-click it → **Copy** → **Copy as cURL**. Paste it in a terminal, then **delete the `Authorization: Bearer ...` line** (that's your logged-in session) and keep only the `apikey` header (the public key). That simulates a logged-out stranger who read your bundle:
+
+```bash
+# A logged-out stranger, using only the PUBLIC key from your bundle
+curl "https://abcdefghijklmnop.supabase.co/rest/v1/bookings?select=*" \
+  -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+Now read the response, and this is the whole ballgame:
+
+- **`[]` or a `401`/`permission denied`** → Row Level Security is doing its job. The public key reaches nothing it shouldn't. This is what you want.
+- **Rows of real data** → you just did what Matt Palmer did to 170 apps. Anyone on earth can run that command. Try other table names you know exist (`profiles`, `messages`, `users`, `orders`); guessing table names is easy and attackers automate it.
+
+You can also point the key at the REST root to probe what's exposed. (Supabase now blocks the OpenAPI schema at `/rest/v1/` for `anon`/publishable keys and returns `403`, precisely because it leaked schema details; older projects may still answer. ([Supabase changelog](https://supabase.com/changelog/42949-breaking-change-removing-access-to-openapi-spec-via-the-anon-key)))
+
+### Move 3: Become another user (4 min)
+
+Logged back in as yourself, find a request that loads *your* data by ID, for example `GET /rest/v1/invoices?id=eq.1001` or `GET /api/invoices/1001`. Change the number to one you don't own and send it again (in the Network tab, "Edit and Resend," or re-run the copied `curl`):
+
+```bash
+# Logged in as yourself, but asking for someone else's record
+curl "https://abcdefghijklmnop.supabase.co/rest/v1/invoices?id=eq.1002" \
+  -H "apikey: <public key>" -H "Authorization: Bearer <your own session token>"
+```
+
+If invoice 1002 belongs to another user and you get it back, that's an **IDOR** (Module 2, Part 1): the app checks that you're logged in, but not that the row is yours. No row-level rules, or a missing ownership check in an API route, and every user's data is one number away.
+
+### What you just learned
+
+You didn't hack anything. You read public code and replayed ordinary requests. That's the entire skill set behind most of the incidents in this module, and it's why "nobody knows the URL" and "it's only in the frontend" are not security. The browser hands every visitor the address and the public key. **The only thing standing between a stranger and your data is the access rules on the server**, which is exactly what Module 2 teaches you to write and verify. The exercise below has you run these same three moves against your own app.
+
 ---
 
 ## Exercise: The 30-Minute Stranger Audit
@@ -574,7 +654,9 @@ If every line is empty, congratulations, and well done. If not, you just found w
 - **"It works" isn't evidence of "it's safe."** Test as the wrong user, not the right one.
 - You can still use AI. You just have to **check what it built**, and Module 2 shows you exactly what to check.
 
-Next: [Module 2: The Actual Vulnerabilities That Get You Hacked →](02-security-vulnerabilities.md)
+---
+
+**Next up:** [Module 2: The Actual Vulnerabilities That Get You Hacked](02-security-vulnerabilities.md) · [Back to course outline](../course-outline.md)
 
 ---
 
@@ -588,7 +670,10 @@ Next: [Module 2: The Actual Vulnerabilities That Get You Hacked →](02-security
 - GitGuardian, *State of Secrets Sprawl 2025*: [report](https://www.gitguardian.com/state-of-secrets-sprawl-report-2025) · [blog summary](https://blog.gitguardian.com/the-state-of-secrets-sprawl-2025/) · [CSO Online on the Copilot finding](https://www.csoonline.com/article/3953927/ai-programming-copilots-are-worsening-code-security-and-leaking-more-secrets.html)
 - Spracklen et al., *We Have a Package for You! A Comprehensive Analysis of Package Hallucinations by Code Generating LLMs*, USENIX Security 2025: [USENIX page](https://www.usenix.org/conference/usenixsecurity25/presentation/spracklen) · [PDF](https://www.usenix.org/system/files/usenixsecurity25-spracklen.pdf)
 - The Register, *AI bots hallucinate software packages and devs download them* (Mar 2024, the `huggingface-cli` experiment): [article](https://www.theregister.com/security/2024/03/28/ai-bots-hallucinate-software-packages-and-devs-download-them/858011)
-- OWASP Top 10:2025: [owasp.org/Top10/2025](https://owasp.org/Top10/2025/)
+- OWASP Top 10:2025: [top10.owasp.org/2025](https://top10.owasp.org/2025/)
+- IBM, *Cost of a Data Breach Report 2025*: [report](https://www.ibm.com/reports/data-breach) · [newsroom summary (AI access controls, shadow AI)](https://newsroom.ibm.com/2025-07-30-ibm-report-13-of-organizations-reported-breaches-of-ai-models-or-applications,-97-of-which-reported-lacking-proper-ai-access-controls)
+- NBC News, Tea app lawsuits (10 potential class actions by Aug 5, 2025): [article](https://www.nbcnews.com/tech/social-media/10-women-sued-tea-app-photos-hacked-leaked-online-rcna222880)
+- Supabase changelog, removing anon-key access to the OpenAPI spec at `/rest/v1/`: [changelog](https://supabase.com/changelog/42949-breaking-change-removing-access-to-openapi-spec-via-the-anon-key)
 
 **Incidents**
 - Lovable / CVE-2025-48757, Matt Palmer: [CVE write-up](https://mattpalmer.io/posts/2025/05/CVE-2025-48757/) · [statement](https://mattpalmer.io/posts/2025/05/statement-on-CVE-2025-48757/)
@@ -608,7 +693,7 @@ Next: [Module 2: The Actual Vulnerabilities That Get You Hacked →](02-security
 - GitHub changelog, MCP server lockdown mode and content sanitization (Dec 2025): [github.blog](https://github.blog/changelog/2025-12-10-the-github-mcp-server-adds-support-for-tool-specific-configuration-and-more/)
 - General Analysis, *Supabase MCP can leak your entire SQL database* (July 2025): [generalanalysis.com](https://generalanalysis.com/blog/supabase-mcp-blog) · [Willison's write-up](https://simonwillison.net/2025/Jul/6/supabase-mcp-lethal-trifecta/)
 - Supabase MCP documentation, security risks section: [supabase.com](https://supabase.com/docs/guides/ai-tools/mcp)
-- Model Context Protocol, security best practices: [modelcontextprotocol.io](https://modelcontextprotocol.io/specification/2025-06-18/basic/security_best_practices)
+- Model Context Protocol, security best practices: [modelcontextprotocol.io](https://modelcontextprotocol.io/docs/2025-11-25/tutorials/security/security_best_practices)
 
 **Threat modeling (Part 6)**
 - Microsoft, STRIDE threat categories: [learn.microsoft.com](https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats)

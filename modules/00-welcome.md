@@ -5,7 +5,7 @@
 
 Hi. You're here because you shipped something, or you're about to, and some part of you suspects that "it works on the preview" isn't the same as "it works."
 
-That part of you is right. This module is short. It explains what vibe coding is, what it's actually good at, the trade-off you make each time you hit Accept All, and how the rest of the course is laid out. There's no code yet. Think of it as the conversation before the intervention: everyone sits down, nobody's in trouble yet, and we'd like to talk about your choices.
+That part of you is right. This module explains what vibe coding is, what it's actually good at, the trade-off you make each time you hit Accept All, and how the rest of the course is laid out. There's one side-by-side code example, but nothing you need to run yet. Think of it as the conversation before the intervention: everyone sits down, nobody's in trouble yet, and we'd like to talk about your choices.
 
 ---
 
@@ -20,10 +20,14 @@ By the end of this module you will be able to:
 5. Do a two-minute honesty check on a project you've already shipped.
 6. Place any project on a simple risk matrix and decide how much engineering it needs.
 7. Use the course's five-step AI workflow: **plan → generate → read → test → verify**.
+8. Spot, in a real diff, the difference between an Accept-All change and a reviewed one.
+9. Name your level on the course's **maturity ladder** and the level each of your projects needs before it ships.
 
 ---
 
-## Vibe Fail: The Weekend Launch *(illustrative composite, not a real event)*
+## Vibe Fail: The Weekend Launch
+*Illustrative composite.*
+
 
 Priya has a great idea for a booking app for dog groomers. On Saturday morning she opens an AI app builder and types: *"Build me a booking app for dog groomers with logins, a calendar, and Stripe payments."*
 
@@ -114,13 +118,13 @@ In practice that means:
 
 "Should I vibe-code this?" doesn't have one answer. It depends on two things: **who gets hurt if it breaks or leaks**, and **how hard it is to undo**. Find your project in this table:
 
-| Project type | Examples | Who gets hurt if it fails? | Pure vibe coding? | Minimum bar before shipping |
-|---|---|---|---|---|
-| **Throwaway prototype** | A weekend demo, a pitch mock-up, a UI experiment | Nobody (maybe your ego) | ✅ Go for it | Don't put real data in it. Don't deploy it with real keys. |
-| **Personal tool** | A script that renames your files, a habit tracker only you use | You | ✅ Mostly fine | Back up anything it touches. Keep keys out of public repos. |
-| **Internal tool** | A dashboard for your team, an ops script, an admin helper | Your colleagues, your company's data | ⚠️ Prototype yes, ship no | Auth on everything, no production write access without review, someone else reads the code. |
-| **Public app with real users** | Anything strangers sign up for | Users who trusted you with their accounts and data | ❌ Not without review | Modules 1–2 pre-launch checklist, tested access rules, secret scanning, backups. |
-| **Money, health, identity, or kids' data** | Payments, medical notes, ID verification, anything used by minors | People who may face fraud, stalking, discrimination, or legal harm | ❌ Absolutely not | All of the above, *plus* an experienced human reviewer, logging and alerting, an incident plan, and legal and compliance awareness. |
+| Project type | Examples | Who gets hurt if it fails? | Pure vibe coding? | Minimum bar before shipping | Ladder minimum |
+|---|---|---|---|---|---|
+| **Throwaway prototype** | A weekend demo, a pitch mock-up, a UI experiment | Nobody (maybe your ego) | ✅ Go for it | Don't put real data in it. Don't deploy it with real keys. | Level 0 |
+| **Personal tool** | A script that renames your files, a habit tracker only you use | You | ✅ Mostly fine | Back up anything it touches. Keep keys out of public repos. | Level 1 |
+| **Internal tool** | A dashboard for your team, an ops script, an admin helper | Your colleagues, your company's data | ⚠️ Prototype yes, ship no | Auth on everything, no production write access without review, someone else reads the code. | Level 2 (Level 3 if it can write to production data) |
+| **Public app with real users** | Anything strangers sign up for | Users who trusted you with their accounts and data | ❌ Not without review | Modules 1–2 pre-launch checklist, tested access rules, secret scanning, backups. | Level 3 |
+| **Money, health, identity, or kids' data** | Payments, medical notes, ID verification, anything used by minors | People who may face fraud, stalking, discrimination, or legal harm | ❌ Absolutely not | All of the above, *plus* an experienced human reviewer, logging and alerting, an incident plan, and legal and compliance awareness. | Level 4 |
 
 **Quick self-assessment.** Answer these about your current project. Each "yes" moves you one row down the table:
 
@@ -131,6 +135,14 @@ In practice that means:
 5. Would I be in trouble (with a customer, a boss, or a regulator) if it went down for a day or lost its data?
 
 **0 yes:** vibe freely. **1–2:** vibe the prototype, then apply Modules 1–4 before real users arrive. **3+:** treat this as an engineering project that happens to use AI, not an AI project that happens to touch people.
+
+The "Ladder minimum" column refers to the maturity ladder defined at the end of this module: the lowest level of engineering practice you should be working at before a project in that row goes live.
+
+**Three projects, three bars** *(illustrative examples)*:
+
+- **Sam's photo renamer.** A 60-line Python script that renames vacation photos by date. Only Sam runs it, on his own laptop. Row 2, personal tool. The one real risk is that it renames or overwrites the wrong files, so the minimum bar is "run it on a copy of the folder first." Pure vibes plus a backup is fine.
+- **The ops team's refund dashboard.** An internal page that lists Stripe charges and has a "Refund" button. Only five employees use it, so it *feels* like an internal toy. But it can move money, which is question 3 in the self-assessment, so it drops a row. Before it goes live: login required, the Stripe secret key stays on the server, every refund is logged with who clicked it, and someone other than the author reads the refund code.
+- **A homework-help app for 12-year-olds.** Public sign-ups, chat messages, and minors. That's the bottom row on day one. It needs everything in Modules 1–2 plus an experienced reviewer, and, depending on where it operates, children's privacy law (such as COPPA in the US) is now part of your requirements. "We were just testing the market" won't make that go away.
 
 The point isn't that vibe coding is bad. The point is that **the bar rises with the stakes**, and most of the incidents in Module 1 happened because someone shipped a top-row process into a bottom-row situation.
 
@@ -163,19 +175,103 @@ Do not write code until I approve the plan.
 
 Notice what that prompt does: it gets the AI to do step 1 *with* you instead of skipping straight to step 2. The Stanford researchers found that people who gave the AI clearer specifications, and who edited and questioned its output, ended up with more secure code ([Perry et al.](https://arxiv.org/abs/2211.03622)). Planning is how you give it those specifications.
 
+### 8. Same feature, two ways: Accept All vs. reviewed
+
+*Illustrative example.* The code is realistic (a Next.js App Router API route with Prisma), but the app and the timings are made up.
+
+The task: **"Let users edit their profile (display name and bio)."** This is a boring, everyday feature, exactly the kind people Accept All without a second look. Watch how the same task produces very different code depending on whether a human stays in the loop.
+
+**Version A: Accept All (about 3 minutes).** The prompt is one line: `add a page where users can edit their profile`. Here is the part that matters, the API route that saves the change:
+
+```ts
+// app/api/profile/route.ts  — Version A (as generated, shipped unread)
+import { prisma } from "@/lib/db";
+
+export async function POST(req: Request) {
+  const body = await req.json();
+  const user = await prisma.user.update({
+    where: { id: body.id },   // whoever the request says it is
+    data: body,               // whatever the request sends
+  });
+  return Response.json(user);
+}
+```
+
+It works. The form saves, the name updates, the demo looks perfect. Ship it.
+
+**Version B: AI-assisted with review (about 15 minutes).** Same model, same feature. The difference is a human who plans first and reads the diff. The prompt names the constraints up front:
+
+```text
+Add an API route so a logged-in user can edit ONLY their own display name and bio.
+- Get the user id from the server session, never from the request body.
+- Accept only displayName and bio. Ignore/reject any other field.
+- Validate: displayName 1–50 chars, bio max 500 chars.
+Show me the diff and list anything you assumed or skipped.
+```
+
+```ts
+// app/api/profile/route.ts  — Version B (after review)
+import { prisma } from "@/lib/db";
+import { getServerSession } from "@/lib/auth";
+import { z } from "zod";
+
+const ProfileUpdate = z
+  .object({ displayName: z.string().min(1).max(50), bio: z.string().max(500) })
+  .strict(); // unknown fields are rejected, not ignored
+
+export async function POST(req: Request) {
+  const session = await getServerSession();
+  if (!session) return new Response("Unauthorized", { status: 401 });
+
+  const parsed = ProfileUpdate.safeParse(await req.json());
+  if (!parsed.success) return new Response("Invalid input", { status: 400 });
+
+  const user = await prisma.user.update({
+    where: { id: session.user.id },        // identity comes from the session
+    data: parsed.data,                      // only the two allowed fields
+    select: { id: true, displayName: true, bio: true },
+  });
+  return Response.json(user);
+}
+```
+
+**The diff, read like a reviewer:**
+
+| What review caught in Version A | Why it matters | The attack it stops |
+|---|---|---|
+| `where: { id: body.id }` | The request *chooses* which account to edit. | I send `{"id":"your-id","displayName":"hi"}` and edit **your** profile. (This is an IDOR; Module 2, Part 1.) |
+| `data: body` | Every field in the body is written to the row, including ones you never meant to expose. | I send `{"id":"my-id","role":"admin","credits":99999}` and promote myself. (This is mass assignment; Module 2.) |
+| No input validation | A 2 MB "bio" or a wrong type goes straight to the database. | Garbage data, oversized rows, and a surface for other bugs. |
+| No auth check | Nothing confirms the caller is even logged in. | A logged-out stranger with `curl` can call it. |
+
+Version A took three minutes and shipped at least two serious vulnerabilities. Version B took fifteen minutes and shipped neither. The feature on screen is identical. The only difference is that a human wrote down what "correct" meant *before* generating, then read the diff *after*. That fifteen-minute habit is the whole course.
+
+
 ---
 
 ## What Good Looks Like: The Vibe-Coder Maturity Ladder
 
-| Level | You… | Fine for… |
-|---|---|---|
-| 0. Pure vibes | Accept All, ship, pray | Throwaway toys with no users or data |
-| 1. Reader | Read the AI's summary and skim the diff | Personal tools |
-| 2. Questioner | Ask the AI to explain risky parts, and push back | Internal tools with low-risk data |
-| 3. Verifier | Test as a logged-out or other user, run scanners, check access rules | Small public apps |
-| 4. Owner | Can explain the architecture, threat model, and failure modes; reviews every change | Anything handling other people's data or money |
+This ladder is the course's shared vocabulary. Later modules refer back to it by name, and the risk matrix above tells you the **minimum** level each kind of project needs before it ships. These are the canonical definitions; wherever another module mentions a "Level," it means this.
 
-The goal of this course is to get you to Level 3 quickly and to Level 4 for anything that matters. You'll still prompt all day. You'll just stop doing it with your eyes closed.
+| Level | Name | You… | The lowest-risk project this is enough for |
+|---|---|---|---|
+| **0** | **Pure vibes** | Accept All, ship, and hope. You never open a code file. | Throwaway prototypes with no real users and no real data |
+| **1** | **Reader** | Read the AI's summary and skim every diff before accepting it. | Personal tools only you use (back up what they touch) |
+| **2** | **Questioner** | Ask the AI to explain the risky parts, push back, and reject changes you don't understand. | Internal tools with low-risk data and no production write access |
+| **3** | **Verifier** | Prove it with evidence: test as a logged-out and as a different user, run secret and dependency scanners, check access rules directly. | Public apps real strangers sign up for; any internal tool that can write to production |
+| **4** | **Owner** | Can explain the architecture, threat model, and failure modes; review every change; keep logging, alerts, backups, and an incident plan. | Anything touching money, health, identity, or kids' data |
+
+**How the levels map to the risk tiers** (this is the canonical mapping; the "Ladder minimum" column in the risk matrix above says the same thing):
+
+- **Throwaway prototype → Level 0.** Vibe freely. Just keep real data and real keys out of it.
+- **Personal tool → Level 1.** Read what you ship, and back up anything it can change.
+- **Internal tool → Level 2**, or **Level 3** if it can write to production data or move money.
+- **Public app with real users → Level 3.** Verification with evidence is the bar, not optional.
+- **Money, health, identity, or kids' data → Level 4.** Nothing below full ownership is acceptable.
+
+The goal of this course is to get you to **Level 3 for anything with real users, and Level 4 for anything that matters.** You'll still prompt all day. You'll just stop doing it with your eyes closed.
+
+Two honest notes. First, your level can differ per project: you might be a Level 4 Owner of your startup's app and a happy Level 0 on a weekend toy. Match the level to the row in the risk matrix, not to your ego. Second, the levels are cumulative: a Verifier still reads diffs and still questions risky code. You don't skip rungs.
 
 ### A prompt habit to start today
 
@@ -282,4 +378,6 @@ If you have more than one "no," you're the target audience, and Modules 1 and 2 
 - Use the loop on every change: **plan → generate → read → test → verify**, in small steps.
 - Start today: **read what the AI says it did**, and ask it to list its shortcuts.
 
-Next: [Module 1: Why Your Vibe-Coded App Is Probably Vulnerable →](01-security-reality.md)
+---
+
+**Next up:** [Module 1: Why Your Vibe-Coded App Is Probably Vulnerable](01-security-reality.md) · [Back to course outline](../course-outline.md)
