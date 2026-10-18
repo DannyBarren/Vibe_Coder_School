@@ -28,8 +28,7 @@ By the end of this module you will be able to:
 ---
 
 ## Vibe Fail: The Orders Table With 60 Columns
-
-*(Illustrative story; every piece of it is common.)*
+*Illustrative composite.*
 
 Sam's meal-kit startup ran on a single `orders` table the AI designed in the first week. It had 60 columns: `customer_name`, `customer_email`, `customer_address`, `item1_name`, `item1_price`, `item2_name`... up to `item8_price`, plus a `notes` JSON column that held "everything else."
 
@@ -256,7 +255,7 @@ Every hosting provider will tell you backups are "enabled." Three questions matt
 
 The third question is the one that hurts. In January 2017, GitLab.com accidentally deleted its primary production database directory. When the team went to restore, they discovered their regular `pg_dump` backups had been silently failing, due to a version mismatch, with failure notification emails being rejected. They recovered from a roughly six-hour-old snapshot and permanently lost about six hours of production data, affecting around 5,000 projects ([GitLab's postmortem](https://about.gitlab.com/blog/postmortem-of-database-outage-of-january-31/)). GitLab had several backup mechanisms. None had been tested end to end.
 
-And in July 2025, a Replit AI agent deleted a user's production database during an explicit code freeze, then told him a rollback was impossible. It wasn't; the rollback worked ([The Register](https://www.theregister.com/software/2025/07/21/vibe-coding-service-replit-deleted-production-database/719783); [Fast Company](https://www.fastcompany.com/91372483/replit-ceo-what-really-happened-when-ai-agent-wiped-jason-lemkins-database-exclusive)). Know your own recovery options; don't ask the thing that just deleted your data whether it can be recovered.
+And in July 2025, a Replit AI agent deleted a user's production database during a code freeze, then claimed a rollback was impossible; it wasn't ([Module 1 has the full timeline](01-security-reality.md#29-anatomy-of-an-incident-2-replit-and-the-saastr-database)). Know your own recovery options; don't ask the thing that just deleted your data whether it can be recovered.
 
 **A backup you haven't restored is a rumor.**
 
@@ -265,7 +264,7 @@ Backup checklist:
 - [ ] Automated backups enabled, with retention of at least 7 days (longer for important data).
 - [ ] Point-in-time recovery if your provider offers it.
 - [ ] At least one copy stored somewhere other than the primary provider/account (e.g., a scheduled `pg_dump` to separate storage) for important apps.
-- [ ] A **restore test** at least quarterly: restore into a fresh database, point a staging copy of the app at it, confirm the data is there and the app works. Write down how long it took.
+- [ ] A **restore drill** at least quarterly. [Section 14](#14-a-backup-restore-drill-you-can-actually-run) has a script and the full procedure.
 - [ ] Backup failures alert someone ([Module 6](06-observability.md)).
 - [ ] File storage (uploads, images) has its own backup or versioning plan; database backups don't cover it.
 
@@ -292,7 +291,7 @@ If you soft delete, enforce the filter in one place (a database view, an ORM def
 
 ```js
 0.1 + 0.2            // 0.30000000000000004
-19.99 * 3            // 59.97000000000001
+4.35 * 100           // 434.99999999999994  (so Math.floor gives 434 cents, not 435)
 ```
 
 Floating-point numbers can't represent most decimals exactly. For money:
@@ -345,9 +344,17 @@ WHERE t.value->>'due' IS NOT NULL
 SELECT id, name, jsonb_typeof(data->'tasks') AS tasks_type
 FROM projects
 WHERE data ? 'tasks' AND jsonb_typeof(data->'tasks') <> 'array';
+
+-- Tasks whose "done" isn't a real JSON boolean (e.g. "yes", 1, or "true" as a string)
+SELECT p.id, p.name, t.value->'done' AS bad_done
+FROM projects p
+CROSS JOIN LATERAL jsonb_array_elements(
+  CASE WHEN jsonb_typeof(p.data->'tasks') = 'array' THEN p.data->'tasks' ELSE '[]'::jsonb END
+) AS t(value)
+WHERE jsonb_typeof(t.value->'done') NOT IN ('boolean', 'null');
 ```
 
-On a realistic dataset this finds things like `"due": "next friday"` and a project where `tasks` is an object instead of an array. Decide what to do with each (here: unparseable dates become NULL, the odd project gets fixed by hand) *before* you migrate, not halfway through.
+On a realistic dataset this finds things like `"due": "next friday"`, `"done": "yes"`, and a project where `tasks` is an object instead of an array. Decide what to do with each (here: unparseable dates become NULL, anything that isn't a real boolean counts as not done, the odd project gets fixed by hand) *before* you migrate, not halfway through.
 
 **Step 1: Expand.** Add the new table. Purely additive, so the running code doesn't notice:
 
@@ -375,7 +382,8 @@ INSERT INTO tasks (project_id, title, done, due_date, position)
 SELECT
   p.id,
   COALESCE(NULLIF(trim(t.value->>'title'), ''), '(untitled)'),
-  COALESCE((t.value->>'done')::boolean, false),
+  CASE WHEN jsonb_typeof(t.value->'done') = 'boolean'
+       THEN (t.value->'done')::boolean ELSE false END,  -- "yes", 1, missing → false (found in pre-flight)
   CASE WHEN t.value->>'due' ~ '^\d{4}-\d{2}-\d{2}$'
        THEN (t.value->>'due')::date END,          -- unparseable dates become NULL (found in pre-flight)
   t.position::int
@@ -414,7 +422,7 @@ UPDATE projects SET data = data - 'tasks'
 WHERE jsonb_typeof(data->'tasks') = 'array';
 ```
 
-Note the `WHERE`: an earlier draft of this step removed `tasks` from *every* project, which would have silently destroyed the odd non-array data the pre-flight found. "Delete everything that matches a key" is the kind of line an AI writes without blinking. Read it twice. Take a backup first.
+Note the `WHERE`: without it, this line would strip `tasks` from *every* project, silently destroying the odd non-array data the pre-flight found. "Delete everything that matches a key" is the kind of line an AI writes without blinking. Read it twice. Take a backup first.
 
 Five steps instead of one "migrate everything" prompt. Each step is reversible until the last, and the app works throughout.
 
@@ -471,7 +479,7 @@ Seed rules:
 
 ### 14. A backup restore drill you can actually run
 
-Section 8 said "a backup you haven't restored is a rumor." Here's a script that turns the rumor into evidence. It dumps a database, restores it into a separate scratch database, compares row counts, and times the whole thing. Tested against Postgres 17:
+Section 8 said "a backup you haven't restored is a rumor." Here's a script that turns the rumor into evidence. It dumps a database, restores it into a separate scratch database, compares row counts, and times the whole thing:
 
 ```bash
 #!/usr/bin/env bash
@@ -576,12 +584,275 @@ The rules that make it work:
 
 - **Every tenant-owned table gets `org_id NOT NULL`.** Even child tables like tasks, so every query can filter by tenant directly.
 - **Uniqueness is per tenant:** `UNIQUE (org_id, slug)`, not `UNIQUE (slug)`. Two companies can both have a project called "launch."
-- **Composite foreign keys** (`(org_id, project_id) REFERENCES org_projects (org_id, id)`) make it *impossible* for a task in one organization to point at another organization's project. Tested: the database rejects the cross-tenant insert outright.
+- **Composite foreign keys** (`(org_id, project_id) REFERENCES org_projects (org_id, id)`) make it *impossible* for a task in one organization to point at another organization's project. The database rejects the cross-tenant insert outright.
 - **Index by tenant first:** `(org_id, created_at)`, `(org_id, project_id)`. Nearly every query filters by tenant.
 - **Every query is scoped by tenant**, enforced in one place: a repository layer that requires `orgId` as an argument, and ideally database-level Row Level Security as a backstop. How to set up and test RLS properly is covered in [Module 2](02-security-vulnerabilities.md); the four-case auth tests from [Module 4](04-testing.md) apply per tenant too.
 - **The tenant comes from the session**, via a membership check, never from a request parameter the user can change.
 
 Other models exist (a separate schema or a separate database per tenant). They give stronger isolation and are sometimes required by enterprise customers or regulation, at the cost of much more operational work. If someone asks for them, that's a good moment for an ADR ([Module 5](05-architecture.md)) and possibly an experienced engineer ([Module 9](09-tech-debt.md)).
+
+### 16. Schema walkthroughs: three apps you might actually build
+
+Theory is easier to apply when you've seen it on real shapes. Here are three of the most common vibe-coded app types, with the decisions that matter called out. (Each is a starting point, not a final design.)
+
+#### A. SaaS with teams
+
+You've already seen it: section 15 *is* this schema (organizations, memberships with roles, tenant-scoped projects and tasks with composite foreign keys). Two additions most SaaS apps need soon:
+
+- **Invites** as their own table (`org_id`, `email`, `role`, `token`, `status`, `expires_at`), with a partial unique index so the same email can't have two pending invites to one org: `CREATE UNIQUE INDEX ON invites (org_id, lower(email)) WHERE status = 'pending';`. That index is the database-level backstop for the double-click problem from [Module 5](05-architecture.md)'s worked refactor.
+- **Billing state on the organization, not the user** (`plan`, `stripe_customer_id`, `seats`). The first time a company asks "can we move our subscription to a different admin?", you'll be glad.
+
+#### B. A marketplace
+
+Buyers purchase listings from many sellers, sometimes several sellers in one checkout. The traps are about **money and history**:
+
+```sql
+-- Marketplace: buyers order from many sellers in one checkout
+CREATE TABLE sellers (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id          uuid NOT NULL UNIQUE,            -- one seller profile per user
+  display_name     text NOT NULL,
+  payout_account   text,                            -- e.g. a Stripe Connect account ID
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE listings (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  seller_id     uuid NOT NULL REFERENCES sellers(id),
+  title         text NOT NULL,
+  price_cents   integer NOT NULL CHECK (price_cents > 0),
+  currency      char(3) NOT NULL DEFAULT 'USD',
+  stock         integer NOT NULL CHECK (stock >= 0),  -- can never go negative
+  status        text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'archived')),
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_listings_seller ON listings (seller_id);
+
+CREATE TABLE orders (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  buyer_id      uuid NOT NULL,
+  status        text NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'paid', 'refunded', 'cancelled')),
+  total_cents   integer NOT NULL CHECK (total_cents >= 0),
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_orders_buyer_created ON orders (buyer_id, created_at DESC);
+
+CREATE TABLE order_items (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id          uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  listing_id        uuid NOT NULL REFERENCES listings(id),
+  seller_id         uuid NOT NULL REFERENCES sellers(id),  -- copied: who gets paid for this line
+  title_snapshot    text NOT NULL,                         -- what the buyer saw at checkout
+  unit_price_cents  integer NOT NULL CHECK (unit_price_cents > 0),
+  quantity          integer NOT NULL CHECK (quantity > 0)
+);
+CREATE INDEX idx_order_items_order ON order_items (order_id);
+CREATE INDEX idx_order_items_seller ON order_items (seller_id);
+
+CREATE TABLE payouts (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  seller_id     uuid NOT NULL REFERENCES sellers(id),
+  amount_cents  integer NOT NULL CHECK (amount_cents > 0),
+  status        text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'paid', 'failed')),
+  period_start  date NOT NULL,
+  period_end    date NOT NULL,
+  CHECK (period_end > period_start),
+  UNIQUE (seller_id, period_start)   -- you can't pay the same seller twice for one period
+);
+```
+
+The decisions worth noticing:
+
+- **`order_items` copies the price and title** at checkout (`unit_price_cents`, `title_snapshot`). If a seller changes the price tomorrow, last month's orders must still show what the buyer actually paid. Joining to the live `listings.price_cents` is one of the most common marketplace bugs: suddenly every historical receipt is wrong.
+- **`order_items.seller_id`** makes "what do we owe each seller?" a simple `GROUP BY seller_id` instead of a join puzzle.
+- **`stock CHECK (stock >= 0)`** means two buyers racing for the last item can't both win. Decrement with `UPDATE listings SET stock = stock - 1 WHERE id = $1 AND stock >= 1 RETURNING stock`; zero rows back means it's sold out. Even if some code path forgets the `WHERE`, the constraint rejects the negative stock.
+- **`UNIQUE (seller_id, period_start)` on payouts** makes "we accidentally paid everyone twice because the payout job ran twice" impossible. That one constraint can save a small marketplace thousands of dollars on its worst day.
+- **Statuses are constrained** to known values, so a typo like `'payed'` can't sneak in and make orders invisible to every query filtering on `'paid'`.
+
+#### C. A booking app
+
+Salons, tutors, meeting rooms, rental gear: anything with a calendar. The hard part is the one every demo skips: **two people booking the same slot at the same time.** See section 17 for the schema and the concurrency fix, which is the main event here. Two more booking decisions:
+
+- **Store bookings as real instants** (`timestamptz`, or a `tstzrange` of them), and store the **resource's time zone** separately to display "2:00 PM" correctly for the salon, whatever time zone the customer's laptop is in.
+- **Cancel by status, don't delete.** A cancelled booking is history you'll need for refunds, no-show policies, and disputes (section 9).
+
+### 17. The double-booking bug, and the fix that actually works
+
+*(Illustrative composite.)* A yoga studio's booking app, built in a weekend. The booking endpoint does what you'd do by hand:
+
+```ts
+// BAD: check, then insert. Two requests can both pass the check.
+const clash = await db.booking.findFirst({
+  where: { resourceId, start: { lt: end }, end: { gt: start }, status: "confirmed" },
+});
+if (clash) throw new SlotTakenError();
+await db.booking.create({ data: { resourceId, customerId, start, end } });
+```
+
+It passes every test, because tests send one request at a time. Then the studio announces a popular workshop at noon. Two customers tap "Book" within the same 50 milliseconds. Both requests run the `findFirst`, both see no clash, both insert. Two people show up for one spot; one of them took a day off work for it. Multiply by every popular slot, and the owner spends Saturday issuing refunds and apologies. This is the same read → decide → write race from [Module 3](03-reading-code.md), and no amount of application code "checking harder" fixes it, because the gap between the check and the insert is always there.
+
+**The fix: make overlapping bookings impossible in the database.** Postgres has a constraint built for exactly this, the **exclusion constraint**: "no two rows may have the same resource *and* overlapping time ranges."
+
+```sql
+-- Booking: rooms, chairs, tutors, rental cars... anything with a calendar
+CREATE EXTENSION IF NOT EXISTS btree_gist;  -- lets one GiST index mix "=" and "overlaps"
+
+CREATE TABLE resources (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       text NOT NULL,
+  time_zone  text NOT NULL DEFAULT 'America/New_York'  -- where the resource physically is
+);
+
+CREATE TABLE bookings (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  resource_id  uuid NOT NULL REFERENCES resources(id),
+  customer_id  uuid NOT NULL,
+  during       tstzrange NOT NULL,                     -- [start, end) as real instants
+  status       text NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'cancelled')),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  CHECK (lower(during) < upper(during)),
+  -- No two confirmed bookings for the same resource may overlap. Enforced by the database.
+  CONSTRAINT no_double_booking EXCLUDE USING gist (
+    resource_id WITH =,
+    during WITH &&
+  ) WHERE (status = 'confirmed')
+);
+```
+
+Here's what happens when two transactions try to book the same hour at the same moment. The first inserts successfully. The second **waits** for the first to finish, then fails:
+
+```text
+ERROR:  conflicting key value violates exclusion constraint "no_double_booking"
+DETAIL:  Key (resource_id, during)=(..., ["2026-11-05 14:00:00-05","2026-11-05 15:00:00-05"))
+         conflicts with existing key (resource_id, during)=(..., ["2026-11-05 14:00:00-05","2026-11-05 15:00:00-05")).
+```
+
+And back-to-back bookings (14:00-15:00 and 15:00-16:00) are allowed, because `[)` ranges include the start but not the end. Your application code catches the error and shows a friendly message. The error has SQLSTATE code `23P01` (exclusion violation), so you can check for it precisely:
+
+```ts
+try {
+  await db.$executeRaw`
+    INSERT INTO bookings (resource_id, customer_id, during)
+    VALUES (${resourceId}::uuid, ${customerId}::uuid, tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)'))`;
+} catch (err) {
+  if (isPgError(err, "23P01")) throw new SlotTakenError("Sorry, someone just booked that slot.");
+  throw err;
+}
+```
+
+(How you read the SQLSTATE code depends on your driver: `err.code` with node-postgres, and for Prisma raw queries it's on the error's `meta`. Write `isPgError` once in your data layer.)
+
+**The alternative when you can't use a constraint:** lock the parent row inside a transaction, so concurrent bookings for the same resource take turns: `BEGIN; SELECT ... FROM resources WHERE id = $1 FOR UPDATE;` then check for overlaps, insert, and `COMMIT`. The second transaction waits at the `FOR UPDATE` until the first commits, and then sees its booking. It works, but every code path that books must remember to do it. The constraint can't be forgotten.
+
+The general lesson: **any rule of the form "there must never be two X" belongs in the database** (a unique constraint, an exclusion constraint, or a check), with the app's check kept only to show a nice message early.
+
+### 18. Money and time, in code
+
+Section 10 listed the rules. Here they are as code you can copy, with the bugs they prevent.
+
+**Money in JavaScript/TypeScript: integer cents, format at the edge.**
+
+```js
+// money.js — integer cents everywhere; convert only for display
+export function formatMoney(cents, currency = "USD", locale = "en-US") {
+  return new Intl.NumberFormat(locale, { style: "currency", currency }).format(cents / 100);
+}
+
+export function applyPercentOff(cents, percentOff) {
+  return Math.round((cents * (100 - percentOff)) / 100); // one deliberate rounding step
+}
+
+// Split an amount into n parts that always add back up to the total
+export function splitCents(totalCents, parts) {
+  const base = Math.floor(totalCents / parts);
+  const remainder = totalCents - base * parts;
+  return Array.from({ length: parts }, (_, i) => base + (i < remainder ? 1 : 0));
+}
+```
+
+```js
+formatMoney(1999 * 3)                  // "$59.97"
+applyPercentOff(1999, 10)              // 1799, displayed as "$17.99"
+splitCents(10000, 3)                   // [3334, 3333, 3333], adds up to 10000
+formatMoney(123456, "EUR", "de-DE")    // "1.234,56 €"
+
+// The float version of the same split loses a cent:
+(100 / 3).toFixed(2) * 3               // 99.99
+```
+
+That "lost cent" is not academic. Split a $100 group booking three ways with floats, charge each person $33.33, and you've collected $99.99. Do that across thousands of transactions and your books stop reconciling with your payment provider, and someone spends a week finding out why. (`formatMoney` divides by 100, which is right for dollars and euros; currencies like the Japanese yen have no minor unit, so a multi-currency app needs a per-currency exponent.)
+
+**Money in Python: `Decimal`, constructed from strings.**
+
+```python
+from decimal import Decimal, ROUND_HALF_UP
+
+print(round(2.675, 2))                     # 2.67 (!) because 2.675 is really 2.67499999...
+print(Decimal("2.675").quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))  # 2.68
+
+def tax_cents(subtotal_cents: int, rate: str) -> int:
+    """Tax on an amount in cents, rounded half-up to a whole cent."""
+    tax = Decimal(subtotal_cents) * Decimal(rate)
+    return int(tax.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+print(tax_cents(1999, "0.0825"))           # 165  ($1.649175 rounds to $1.65)
+```
+
+`Decimal(2.675)` (from a float) would inherit the float's error; always build `Decimal` from strings or integers.
+
+**Time in Postgres: store instants, convert at the edge.**
+
+```sql
+-- One stored instant, shown in two places:
+SELECT timestamptz '2026-03-08 14:00:00+00' AT TIME ZONE 'America/New_York' AS new_york,
+       timestamptz '2026-03-08 14:00:00+00' AT TIME ZONE 'Asia/Tokyo'       AS tokyo;
+--       new_york       |        tokyo
+-- 2026-03-08 10:00:00  | 2026-03-08 23:00:00
+```
+
+**The "every day at 9 a.m." bug, made visible.** Daylight saving time started in the US on March 8, 2026. Ask Postgres what instant "9 a.m. in New York" is on three consecutive days:
+
+```sql
+SET TIME ZONE 'UTC';
+SELECT d::date AS day,
+       (d::date + time '09:00') AT TIME ZONE 'America/New_York' AS nine_am_in_new_york
+FROM generate_series(date '2026-03-07', date '2026-03-09', interval '1 day') AS d;
+--     day     |  nine_am_in_new_york
+-- 2026-03-07  | 2026-03-07 14:00:00+00
+-- 2026-03-08  | 2026-03-08 13:00:00+00
+-- 2026-03-09  | 2026-03-09 13:00:00+00
+```
+
+A reminder job hardcoded to run at 14:00 UTC sends "your 9 a.m. reminder" at 10 a.m. for the whole summer. Schedule by the user's time zone name, and compute the instant per day.
+
+**Why `timestamp` (without time zone) bites:** it stores the wall-clock text and forgets where it came from.
+
+```sql
+SET TIME ZONE 'UTC';
+CREATE TEMP TABLE clocks (naive timestamp, aware timestamptz);
+INSERT INTO clocks VALUES ('2026-10-17 18:30:00', '2026-10-17 18:30:00');
+SET TIME ZONE 'America/New_York';
+SELECT naive, aware FROM clocks;
+--        naive        |         aware
+-- 2026-10-17 18:30:00 | 2026-10-17 14:30:00-04
+```
+
+The `timestamptz` value correctly says "this happened at 2:30 p.m. New York time." The `timestamp` value still says 18:30, and nothing in the database knows it was UTC. Move servers, change a session setting, or let a second service write to the table, and your timestamps silently mean different things.
+
+**Time in JavaScript: format with the user's zone.**
+
+```js
+const instant = new Date("2026-03-08T14:00:00Z"); // what the API returns (UTC)
+const show = (timeZone) =>
+  new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(instant);
+
+show("America/New_York");    // "Mar 8, 2026, 10:00 AM"
+show("America/Los_Angeles"); // "Mar 8, 2026, 7:00 AM"
+show("Asia/Tokyo");          // "Mar 8, 2026, 11:00 PM"
+```
+
+Store the user's time zone name (from their profile, or `Intl.DateTimeFormat().resolvedOptions().timeZone` in the browser as a default), and pass it explicitly. Never let "whatever time zone the server happens to be in" decide what your users see.
 
 ---
 
@@ -703,9 +974,7 @@ Clean up, then add the constraints via a migration (not by hand in production).
 **Part C: The restore drill (30-60 minutes)**
 
 1. Find out your real backup retention and whether you have point-in-time recovery. Write it down.
-2. Restore your latest backup into a **new**, separate database.
-3. Point a local or staging copy of your app at it. Log in. Check that recent data is there.
-4. Write down how long the whole thing took. That number is your best-case recovery time.
+2. Run the drill from [section 14](#14-a-backup-restore-drill-you-can-actually-run) for real, then point a staging copy of your app at the restored database and check that recent data is there. Write down the total time: that's your best-case recovery time.
 
 If you couldn't complete step 2, you don't have backups. You have hope.
 
@@ -731,4 +1000,4 @@ Run Prompt Template 6. If you store money as floats, plan the migration to integ
 
 ---
 
-**Next up:** [Module 8: Deployment, Environments & Production Reality](08-deployment.md)
+**Next up:** [Module 8: Deployment, Environments & Production Reality](08-deployment.md) · [Back to course outline](../course-outline.md)

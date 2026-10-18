@@ -24,8 +24,7 @@ By the end of this module you will be able to:
 ---
 
 ## Vibe Fail: The Fix That Broke Two Things (×40)
-
-*(Illustrative story. Ask anyone who has vibe coded past the prototype stage; they'll have their own version.)*
+*Illustrative composite.*
 
 Alex's habit-tracking app had a bug: streaks reset at midnight UTC instead of the user's local midnight. Alex pasted the bug into the chat. The AI fixed it.
 
@@ -43,7 +42,7 @@ Alex didn't need a better prompt. Alex needed to **stop prompting**, write ten t
 
 ### 1. Technical debt: a loan with interest
 
-Ward Cunningham introduced the debt metaphor in 1992: "Shipping first time code is like going into debt. A little debt speeds development so long as it is paid back promptly with a rewrite" ([Cunningham, OOPSLA '92](http://c2.com/doc/oopsla92.html)). He also warned that the danger comes when the debt is not repaid: every minute spent on not-quite-right code counts as interest.
+Ward Cunningham introduced the debt metaphor in 1992: "Shipping first time code is like going into debt. A little debt speeds development so long as it is paid back promptly with a rewrite" ([Cunningham, OOPSLA '92](https://c2.com/doc/oopsla92.html)). He also warned that the danger comes when the debt is not repaid: every minute spent on not-quite-right code counts as interest.
 
 Translate that to your app:
 
@@ -59,7 +58,7 @@ Translate that to your app:
 | Known, written down, has a repayment plan | Unknown until it bites |
 | A conscious trade-off (README first principle #3) | A trade-off nobody made |
 
-Pure vibe coding generates accidental debt at industrial scale. GitClear's analysis of 211 million changed lines found that in 2024, copy/pasted code exceeded "moved" code (a signal of refactoring) for the first time in their data, while duplicated blocks rose roughly eightfold ([GitClear 2025](https://www.gitclear.com/ai_assistant_code_quality_2025_research/)). More code is being written; less is being consolidated. That's a lot of loans and not many repayments.
+Pure vibe coding generates accidental debt at industrial scale. GitClear's analysis of 211 million changed lines found that in 2024, copy/pasted code exceeded "moved" code (a signal of refactoring) for the first time in their data, while the frequency of duplicated code blocks (five or more duplicated lines) rose eightfold during 2024 ([GitClear 2025](https://www.gitclear.com/ai_assistant_code_quality_2025_research/)). More code is being written; less is being consolidated. That's a lot of loans and not many repayments.
 
 **Common forms of debt in AI-built apps** (you've met all of them in earlier modules):
 
@@ -464,8 +463,6 @@ describe("currentStreak", () => {
 });
 ```
 
-(All of the code and tests in this section run as shown under Vitest.)
-
 Look at what made this safe:
 
 - Behavior was pinned **before** anything changed.
@@ -475,34 +472,276 @@ Look at what made this safe:
 
 The AI can do every one of these steps for you, *one at a time*, using Prompt Templates 3 and 4. What it can't do is decide the steps, the order, and when each one is verified. That part is engineering.
 
-### 9. Graduation: from vibe coder to AI-assisted engineer
+### 9. Measuring debt: churn × complexity
+
+"This codebase has a lot of debt" is a feeling. "These three files account for most of our pain" is a plan. The most useful cheap measurement comes from Adam Tornhill's work on behavioral code analysis (his book *Your Code as a Crime Scene* and the open-source [code-maat](https://github.com/adamtornhill/code-maat) tool): **hotspots**, the files that are both *complicated* and *changed often*.
+
+The logic is simple once you say it out loud:
+
+- A messy file nobody touches costs you almost nothing. Leave it.
+- A clean file that changes daily is fine. That's healthy work.
+- A **big, messy file that changes every week** is where your time, bugs, and AI confusion pile up. That's where repayment pays off.
+
+You can approximate it with git and a line count (lines of code is a crude but surprisingly useful stand-in for complexity):
+
+```bash
+#!/usr/bin/env bash
+# hotspots.sh: files that change often AND are big. Run from the repo root.
+# usage: ./hotspots.sh "6 months ago"
+since="${1:-6 months ago}"
+
+git log --since="$since" --format= --name-only \
+  | grep -E '\.(ts|tsx|js|jsx|py)$' \
+  | sort | uniq -c \
+  | while read -r changes file; do
+      [ -f "$file" ] || continue                 # skip files that were deleted or renamed
+      lines=$(wc -l < "$file")
+      echo "$((changes * lines)) $changes $lines $file"
+    done \
+  | sort -rn | head -15 \
+  | awk 'BEGIN { printf "%8s %8s %6s  %s\n", "score", "changes", "lines", "file" }
+               { printf "%8s %8s %6s  %s\n", $1, $2, $3, $4 }'
+```
+
+Here's typical output for a vibe-coded app *(illustrative)*:
+
+```text
+   score  changes  lines  file
+   28830       31    930  src/app/dashboard/page.tsx
+    3410       11    310  src/lib/billing.ts
+     880       16     55  src/lib/format.ts
+```
+
+Read it like this: `format.ts` changed often, but it's small, so it's probably fine. `billing.ts` is medium on both, so it's worth a look (it's billing, after all). `dashboard/page.tsx` is the hotspot: 930 lines, changed 31 times in the period, and nearly ten times the score of anything else. If you only refactor one thing this quarter, it's that file. It's also almost certainly where your AI sessions go off the rails, because it barely fits in the context window.
+
+Tips that make the numbers honest:
+
+- **Use a time window** (the last 3-6 months). Ancient history doesn't predict where you'll be working next.
+- **Pair it with your debt register** (section 6) and your bug history. If the hotspot is also where the last five bugs came from, the case makes itself.
+- **Re-run it after refactoring.** A hotspot that drops down the list is the most satisfying chart in software.
+- If you want better complexity numbers than line counts, linters can report cyclomatic complexity (for example ESLint's `complexity` rule, or `radon` for Python). Start with line counts; they're usually enough to find the worst file.
+
+### 10. Worked example: untangling an AI spaghetti function
+
+Here's a different flavor of mess from section 8's date bug: a function that grew by accretion, one prompt at a time ("add refunds to the stats," "add a tier," "also show the last 30 days"). *(Illustrative, but you've probably seen its cousin.)*
+
+```js
+// lib/stats.js (BEFORE): what the AI produced after a dozen "add X to the stats" prompts
+export async function getStats(db, userId) {
+  try {
+    const orders = await db.getOrders(userId);
+    let total = 0, count = 0, refunded = 0;
+    for (let i = 0; i < orders.length; i++) {
+      if (orders[i].status != "cancelled") {
+        if (orders[i].status == "refunded") {
+          refunded = refunded + orders[i].amount;
+        } else {
+          if (orders[i].amount > 0) {
+            total = total + orders[i].amount;
+            count++;
+          }
+        }
+      }
+    }
+    let avg = count > 0 ? total / count : 0;
+    let tier = "bronze";
+    if (total > 50000) tier = "silver";
+    if (total > 200000) tier = "gold";
+    if (total > 1000000) tier = "platinum";
+    // last 30 days
+    const recent = orders.filter((o) => new Date(o.createdAt) > new Date(Date.now() - 2592000000));
+    let recentTotal = 0;
+    for (let i = 0; i < recent.length; i++) {
+      if (recent[i].status != "cancelled") {
+        if (recent[i].status == "refunded") {
+        } else {
+          if (recent[i].amount > 0) recentTotal = recentTotal + recent[i].amount;
+        }
+      }
+    }
+    return { total, count, avg: Math.round(avg), refunded, tier, recentTotal };
+  } catch (e) {
+    console.log(e);
+    return { total: 0, count: 0, avg: 0, refunded: 0, tier: "bronze", recentTotal: 0 };
+  }
+}
+```
+
+Before touching it, list what's wrong, and classify each item as **structure** (safe to change without changing behavior) or **behavior** (changes what users see, needs a decision):
+
+- *Structure:* the completed-order logic is written twice (once for totals, once for "recent"), with nested `if`s and an empty branch. Magic numbers: `2592000000` (30 days in milliseconds), `50000`, `200000`, `1000000` (tier thresholds in cents). `Date.now()` is buried inside, so tests can't control time. Loose `!=`.
+- *Behavior:* the `catch` swallows a database failure and returns **zeros and "bronze."** A platinum customer who opens their dashboard during a database blip is told they've spent $0 and lost their status. If anything downstream (perks, discounts, support priority) reads `tier`, the blip just downgraded them for real.
+
+**Step 1: pin the current behavior with characterization tests.** These describe what the code does *today*, right or wrong, so you'll know if a refactor changes anything by accident. Freeze the clock so "last 30 days" is testable:
+
+```js
+// stats.test.js: characterization tests. They pin what the code does TODAY.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getStats } from "./lib/stats.js";
+
+const order = (amount, status, createdAt) => ({ amount, status, createdAt });
+const dbWith = (orders) => ({ getOrders: async () => orders });
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-17T12:00:00Z"));
+});
+afterEach(() => vi.useRealTimers());
+
+describe("getStats (characterization)", () => {
+  it("sums completed orders and ignores cancelled ones", async () => {
+    const stats = await getStats(dbWith([
+      order(10_000, "paid", "2026-10-01T00:00:00Z"),
+      order(5_000, "paid", "2026-01-01T00:00:00Z"),
+      order(9_999, "cancelled", "2026-10-02T00:00:00Z"),
+      order(2_500, "refunded", "2026-10-03T00:00:00Z"),
+      order(0, "paid", "2026-10-04T00:00:00Z"),
+    ]), "u_1");
+    expect(stats).toEqual({
+      total: 15_000, count: 2, avg: 7_500, refunded: 2_500, tier: "bronze", recentTotal: 10_000,
+    });
+  });
+
+  it.each([
+    [50_000, "bronze"], [50_001, "silver"], [200_001, "gold"], [1_000_001, "platinum"],
+  ])("a lifetime total of %i cents is tier %s", async (amount, tier) => {
+    const stats = await getStats(dbWith([order(amount, "paid", "2026-10-01T00:00:00Z")]), "u_1");
+    expect(stats.tier).toBe(tier);
+  });
+
+  it("counts an order from exactly 30 days ago as not recent", async () => {
+    const stats = await getStats(dbWith([order(1_000, "paid", "2026-09-17T12:00:00Z")]), "u_1");
+    expect(stats.recentTotal).toBe(0);
+  });
+});
+```
+
+Notice the boundary tests: a total of exactly 50,000 cents is still bronze (the code uses `>`), and an order from exactly 30 days ago isn't "recent." You might not have chosen those rules, but they're the rules your users have today. Characterization tests make them visible; changing them is a separate, deliberate decision.
+
+Also pin the swallowed error, explicitly labeled as current behavior:
+
+```js
+import { expect, it, vi } from "vitest";
+import { getStats } from "./lib/stats.js";
+it("CURRENT behavior: a database failure looks like a brand-new customer", async () => {
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  const stats = await getStats({ getOrders: async () => { throw new Error("db down"); } }, "u_1");
+  expect(stats).toMatchObject({ total: 0, tier: "bronze" });
+});
+```
+
+Run the tests: all green against the old code. Commit.
+
+**Step 2: extract and name things (structure only).** Pull the duplicated logic into one predicate, name the magic numbers, replace the nested `if`s with small pure functions, and pass `now` in instead of reaching for the clock. Run the characterization tests after each small move. Commit when green.
+
+**Step 3: change the behavior on purpose, in its own commit.** Stop pretending a database failure is a brand-new customer: let the error propagate so the API returns a proper 500 ([Module 6](06-observability.md)) and the dashboard shows "couldn't load your stats" instead of a lie. Replace the "current behavior" test with the new rule:
+
+```js
+import { expect, it } from "vitest";
+import { getStats } from "./lib/stats.js";
+it("a database failure is reported as an error, not as $0 and bronze", async () => {
+  const db = { getOrders: async () => { throw new Error("db down"); } };
+  await expect(getStats(db, "u_1")).rejects.toThrow("db down");
+});
+```
+
+The result:
+
+```js
+// lib/stats.js (AFTER)
+const DAY_MS = 24 * 60 * 60 * 1000;
+const RECENT_DAYS = 30;
+
+// Lifetime spend thresholds in cents, highest first. "above" means strictly greater than.
+const TIERS = [
+  { name: "platinum", above: 1_000_000 }, // $10,000
+  { name: "gold", above: 200_000 },       // $2,000
+  { name: "silver", above: 50_000 },      // $500
+];
+
+const isCompleted = (order) =>
+  order.status !== "cancelled" && order.status !== "refunded" && order.amount > 0;
+
+const sumAmounts = (orders) => orders.reduce((sum, order) => sum + order.amount, 0);
+
+export function tierFor(totalCents) {
+  return TIERS.find((tier) => totalCents > tier.above)?.name ?? "bronze";
+}
+
+export function summarizeOrders(orders, now) {
+  const completed = orders.filter(isCompleted);
+  const total = sumAmounts(completed);
+  const recentSince = now.getTime() - RECENT_DAYS * DAY_MS;
+
+  return {
+    total,
+    count: completed.length,
+    avg: completed.length > 0 ? Math.round(total / completed.length) : 0,
+    refunded: sumAmounts(orders.filter((order) => order.status === "refunded")),
+    tier: tierFor(total),
+    recentTotal: sumAmounts(completed.filter((order) => new Date(order.createdAt).getTime() > recentSince)),
+  };
+}
+
+export async function getStats(db, userId, now = new Date()) {
+  const orders = await db.getOrders(userId); // a database failure is an error, not "you have $0"
+  return summarizeOrders(orders, now);
+}
+```
+
+Same six characterization tests, still passing, plus the new error test. What changed, in practical terms: the "what counts as a completed order" rule exists once, so the next prompt ("exclude test orders from stats") is a one-line change instead of two edits the AI will get half right. The tier table reads like a business rule a non-engineer could check against the pricing page. And the next time the database hiccups, nobody gets downgraded.
+
+The order was the point: **pin, restructure, then change behavior**, each in its own commit. Asking the AI to "clean up this function and fix the error handling" in one go mixes all three, and if a number changes, you won't know whether it was the cleanup or the fix.
+
+### 11. When to stop vibing: real-life signals
+
+Section 5 covered *when to bring in an engineer*. This is the smaller, more frequent decision: **when to stop prompting and switch modes** (slow down, read, test, design) for a particular piece of work. *(Each scenario is an illustrative composite.)*
+
+**"The third fix for the same bug."** You've asked the AI to fix the checkout total three times; each fix breaks a different case. *Signal:* nobody, including the AI, has a clear model of the rules. *Switch to:* write the rules down as a table of examples (inputs → expected total), turn them into tests, and then let the AI make the tests pass. Section 8's date story is this exact pattern.
+
+**"It touches money, auth, or other people's data."** You're about to add team billing, or let users share documents. *Signal:* mistakes here are expensive, quiet, and sometimes irreversible. *Switch to:* threat-model it first ([Module 1, Part 6](01-security-reality.md#part-6-threat-modeling-lite-stride-in-plain-language)), design the schema and access rules yourself ([Module 7](07-data-modeling.md)), and review every line of the diff rather than skimming the summary.
+
+**"The AI keeps forgetting how the app works."** It reinvents a helper that already exists, uses the wrong table, imports a library you removed. *Signal:* the code has outgrown what fits in a session's context. *Switch to:* run the hotspot script (section 9), split the biggest file, and write or update your rules file ([Module 5](05-architecture.md)).
+
+**"You're afraid to deploy."** Every deploy breaks something, so you batch changes and deploy weekly, which makes each deploy bigger and scarier. *Signal:* no safety net. *Switch to:* stop adding features for a few days and build the net: CI with tests on the critical paths ([Module 4](04-testing.md)), preview deploys and rollback ([Module 8](08-deployment.md)).
+
+**"A real customer depends on it now."** The first company pays you annually, or the first user puts their business's data in your app. *Signal:* the cost of a bad day just went from "embarrassing" to "contract-breaking." *Switch to:* check your level against the target for this kind of project (section 12), and close the gap before the next big feature.
+
+**"It's a weekend experiment."** None of the above applies, nobody else's data is involved, and you might throw it away on Monday. *Signal:* this is exactly where vibing shines. *Keep vibing,* and enjoy it. The skill isn't abstaining from vibe coding; it's knowing which mode the work in front of you deserves.
+
+### 12. Graduation: from vibe coder to AI-assisted engineer
 
 Remember the README's first principles? Understand the problem, consider what can go wrong, make trade-offs consciously, design for verification and observation, account for the full lifecycle, validate assumptions with evidence, and own the outcome. Every module in this course was one of those principles turned into habits.
 
-Here's the ladder. Be honest about where you are. Everyone starts at the bottom.
+Here's the maturity ladder from [Module 0](../modules/00-welcome.md), which is its canonical home. Be honest about where you are. Everyone starts at the bottom.
 
-**Level 0: Pure Vibe Coder**
-Prompt → Accept All → ship. Doesn't read diffs or the AI's summary. No tests, no git habits, secrets wherever they landed. "It works on the preview." *(This is the liability the README warned about.)*
+**Level 0: Pure vibes.** Accept All, ship, pray. Doesn't read diffs or the AI's summary. No tests, no git habits, secrets wherever they landed.
 
-**Level 1: Vibe Coder With a Conscience**
-Reads the AI's summary and skims diffs. Commits before AI sessions. Knows secrets don't go in the repo. Has separate local and production environments. Has heard of RLS and checked whether it's on.
+**Level 1: Reader.** Reads the AI's summary and skims the diff. Commits before AI sessions. Knows secrets don't go in the repo.
 
-**Level 2: AI-Assisted Builder**
-Reviews every diff with a checklist ([Module 3](03-reading-code.md)). Writes tests from requirements, including auth tests ([Module 4](04-testing.md)). Has a rules file the AI follows ([Module 5](05-architecture.md)). Has error tracking and structured logs ([Module 6](06-observability.md)). Uses migrations, constraints, and has tested a restore ([Module 7](07-data-modeling.md)). Deploys through CI with rollbacks and billing alerts ([Module 8](08-deployment.md)).
+**Level 2: Questioner.** Asks the AI to explain the risky parts and pushes back when the answer doesn't hold up. Reviews diffs with a checklist ([Module 3](03-reading-code.md)), including the deletions.
 
-**Level 3: AI-Assisted Engineer**
-Starts with the problem and constraints, not the prompt. Threat-models features before building them ([Module 2](02-security-vulnerabilities.md)). Designs data and architecture deliberately, then uses AI to implement within those constraints. Tracks debt consciously and repays it. Debugs from evidence. Can explain every important part of the system without opening the chat history. Knows the limits of their knowledge and gets help at the right moments. Uses AI for speed, never as a substitute for judgment.
+**Level 3: Verifier.** Doesn't take "it works" on faith: tests as a logged-out user and as a different user, runs scanners, checks access rules. Writes tests from requirements ([Module 4](04-testing.md)), has error tracking and alerts ([Module 6](06-observability.md)), uses migrations and has tested a restore ([Module 7](07-data-modeling.md)), deploys through CI with rollbacks and billing alerts ([Module 8](08-deployment.md)).
 
-**Level 4: Engineer Who Happens to Use AI**
-All of the above is automatic. Sets standards others follow. Reviews other people's AI-generated code. Mentors. Owns systems and outcomes, including the 3 a.m. pages.
+**Level 4: Owner.** Can explain the architecture, the threat model ([Module 1, Part 6](01-security-reality.md#part-6-threat-modeling-lite-stride-in-plain-language)), and the failure modes without opening the chat history. Reviews every change. Tracks debt and repays it, and knows when to bring in help.
 
-You don't need to reach Level 4 to ship responsibly. **For anything that handles other people's data or money, Level 2 is the minimum, and Level 3 is the goal.**
+**Which level you need depends on what you're building** (from Module 0):
+
+| What you're building | Target level |
+|---|---|
+| Throwaway prototype | Level 0 |
+| Personal tool | Level 1 |
+| Internal tool | Level 2 (Level 3 if it can write to production data or move money) |
+| Public app with real users | Level 3 |
+| Money, health, identity, or kids' data | Level 4 |
+
+**The course goal: Level 3 for anything with real users, Level 4 for anything that matters.**
 
 ### The Graduation Checklist
 
 If you can check every box, you've graduated. Not from using AI, but from using it blindly.
 
-**Security ([Modules 1-2](02-security-vulnerabilities.md))**
+**Security ([Module 1](01-security-reality.md) and [Module 2](02-security-vulnerabilities.md))**
 - [ ] Authorization is enforced on the server (and in the database where applicable) for every piece of user data, and I have tests proving users can't access each other's data.
 - [ ] No secrets in the repo, the client bundle, or logs. I know how to rotate each one.
 - [ ] I verify every new dependency exists and is legitimate before installing it.
@@ -678,4 +917,4 @@ Now go read that diff.
 
 ---
 
-**Back to:** [Course Outline](../course-outline.md)
+**Finished!** [Back to course outline](../course-outline.md)

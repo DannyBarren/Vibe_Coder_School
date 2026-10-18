@@ -28,8 +28,7 @@ By the end of this module you will be able to:
 ---
 
 ## Vibe Fail: The $4,000 Weekend
-
-*(Illustrative story; the ingredients are all real and common.)*
+*Illustrative composite.*
 
 Jordan shipped an AI-powered "summarize any PDF" tool on Friday afternoon. Serverless functions, a popular LLM API, a database, all on generous free or pay-as-you-go tiers. The deploy took 40 seconds. Jordan went camping.
 
@@ -62,7 +61,7 @@ An **environment** is a complete, separate copy of your app's running setup: cod
 
 The key rule: **environments don't share databases, secrets, or third-party accounts that move real money or send real messages.** Development uses test-mode Stripe keys, a sandbox email provider, and a local or dev database. Production uses live keys that only production can access.
 
-Why it matters: in July 2025, an AI agent on Replit deleted a user's production database during a declared code freeze. One contributing factor Replit acknowledged was that, at the time, development and production shared a database, so agent actions during development could hit live data. Replit then rolled out separate development and production databases by default ([Replit blog](https://replit.com/blog/doubling-down-on-our-commitment-to-secure-vibe-coding); [The Register](https://www.theregister.com/software/2025/07/21/vibe-coding-service-replit-deleted-production-database/719783)). As the user himself put it, "you can't not separate preview and staging and production cleanly."
+Why it matters: in July 2025, a Replit AI agent deleted a user's production database during a code freeze. One contributing factor was that development and production shared a database; Replit has since made them separate by default ([full timeline in Module 1](01-security-reality.md#29-anatomy-of-an-incident-2-replit-and-the-saastr-database)).
 
 For a small app, you don't need four environments on day one. You do need **at least two: local and production, completely separated**, and you'll want staging as soon as real money or real data is involved.
 
@@ -99,15 +98,11 @@ Secrets management in depth (rotation, scanning for leaks, vaults) is covered in
 
 This deserves its own section because AI agents changed the risk profile. An agent with terminal access and production credentials can run migrations, delete data, rotate keys, or "clean up" resources, quickly, confidently, and sometimes while telling you it didn't.
 
-**Agent guardrails:**
+Module 1 covers agent guardrails in depth ([Part 5: your AI agent is part of the attack surface](01-security-reality.md#part-5-your-ai-agent-is-part-of-the-attack-surface)). The deployment-specific version fits in three rules:
 
-- **No production credentials on your development machine**, or at least not in any file or environment the agent can read. Production secrets live in your hosting platform's secret store and CI secrets.
-- Agents work against **local or dev databases only.** If your tool supports it, configure dev/prod separation explicitly.
-- **Deny-list destructive commands** in your agent's settings where supported: `DROP`, `TRUNCATE`, `rm -rf`, `git push --force`, `terraform destroy`, cloud CLI delete commands, production deploy commands.
-- Require **human approval** for terminal commands that touch infrastructure, databases, or git history. Turn off "auto-run everything" for anything beyond your local sandbox.
-- Production changes happen through **CI/CD and migrations**, reviewed and logged, not through an agent's terminal.
-- Use **least-privilege** credentials: a read-only database user for debugging/analytics, scoped API keys, separate cloud accounts or projects for prod.
-- Write these rules into your `AGENTS.md`/rules file ([Module 5](05-architecture.md)), but **don't rely on instructions alone.** Agents have ignored explicit instructions. Make it technically impossible, not just politely discouraged.
+- **Production credentials never live where the agent can read them.** They belong in your hosting platform's secret store and CI secrets, not in `.env` files on your laptop.
+- **Agents work against local or dev databases only.** Anything that changes production goes through CI/CD and reviewed migrations (sections 4 and 7), never an agent's terminal.
+- **Make it technically impossible, not politely discouraged.** A rule in `AGENTS.md` is a good reminder, but agents have ignored explicit instructions. Least-privilege credentials and human approval for destructive commands are what actually hold.
 
 **Hard truth:** a freeze enforced by a sentence in a chat window is not a freeze. Access control is a freeze.
 
@@ -281,7 +276,7 @@ Something is broken in production. Customers are affected. Here's what to do, in
 
 ### 11. A sample pipeline: lint, test, build, preview, migrate, promote
 
-Here's the CI/CD flow from section 4 as a real GitHub Actions workflow for a Next.js + Prisma app deployed to Vercel. It uses Vercel's documented CLI pattern (`vercel pull` → `vercel build` → `vercel deploy --prebuilt`; see [Vercel's guide](https://vercel.com/kb/guide/how-can-i-use-github-actions-with-vercel)), and it passes `actionlint`. Swap the deploy steps for your platform's CLI if you're elsewhere; the shape stays the same.
+Here's the CI/CD flow from section 4 as a real GitHub Actions workflow for a Next.js + Prisma app deployed to Vercel. It uses Vercel's documented CLI pattern (`vercel pull` → `vercel build` → `vercel deploy --prebuilt`; see [Vercel's guide](https://vercel.com/kb/guide/how-can-i-use-github-actions-with-vercel)). Swap the deploy steps for your platform's CLI if you're elsewhere; the shape stays the same.
 
 ```yaml
 # .github/workflows/ci-cd.yml
@@ -292,10 +287,11 @@ on:
   push:
     branches: [main]
 
-# Don't run two deploys of the same branch at once; newer pushes cancel older runs
+# One run per branch at a time. A new push to a PR cancels the stale run;
+# on main, runs queue instead, so a production deploy or migration is never cut off halfway.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -378,7 +374,7 @@ What each part buys you:
 - **`production` only runs on main, after tests pass**, and uses a GitHub *environment* called `production`. In the repo settings you can require a reviewer for that environment, which turns the job into a "promote to production" button: the pipeline waits until you approve. Environment-scoped secrets (`PROD_MIGRATION_DATABASE_URL`) are only available to that job.
 - **Migrations run before the new code goes live**, which is why they must be backward-compatible (section 7).
 - **Smoke tests** confirm the health endpoint and login page respond after deploy. If they fail, you roll back (section 14).
-- **`concurrency`** stops two deploys of the same branch from racing each other.
+- **`concurrency`** stops two runs of the same branch from racing each other. On pull requests, a newer push cancels the outdated run (saves CI minutes). On `main`, it **never cancels**: killing a job halfway through `prisma migrate deploy` or a production deploy can leave the database migrated but the old code live, which is exactly the half-finished state you're trying to avoid. Instead, the newer run waits its turn.
 
 Setup notes:
 
@@ -494,6 +490,236 @@ Launching (on Product Hunt, Hacker News, to a mailing list, or to a paying clien
 - [ ] Reply to user-reported bugs quickly, even if just "we're on it."
 - [ ] Keep a list of everything that went wrong or almost did. Turn it into tests, alerts, and runbook updates next week.
 - [ ] Only then lift the code freeze.
+
+### 16. Walkthrough: Vercel + Supabase, from laptop to production
+
+Here's the whole path for one of the most common vibe-coded stacks, step by step: a Next.js app on Vercel with Supabase for the database and auth. (Neon, Railway, Render, and others follow the same shape; notes at the end.) Commands follow the [Supabase CLI docs](https://supabase.com/docs/guides/local-development/cli-workflows); check them for current flags.
+
+**Step 1: three separate databases, not one.** Local (on your machine), a staging Supabase project, and a production Supabase project. Separate projects mean separate data, separate keys, and separate auth users. A bug or an agent in development *physically cannot* reach production data, because it doesn't have the address.
+
+**Step 2: develop against a local database.**
+
+```bash
+supabase init                              # creates supabase/ with config and a migrations folder
+supabase start                             # runs Postgres, Auth, and Studio locally (needs Docker)
+supabase migration new create_projects     # creates supabase/migrations/<timestamp>_create_projects.sql
+# ...write the SQL (tables, constraints, RLS policies) in that file...
+supabase db reset                          # rebuilds the LOCAL database from all migrations + seed.sql
+```
+
+`supabase db reset` is your best friend locally, because it proves your migrations build the whole schema from nothing. That's what production will rely on. Commit the migration files with the code that uses them.
+
+**Step 3: push schema changes to staging, then production, through migrations.**
+
+```bash
+supabase login
+supabase link --project-ref <staging-project-ref>
+supabase db push --dry-run                 # shows which migrations WOULD run. Read it.
+supabase db push                           # applies pending migrations to the linked project
+```
+
+Then the same for production, ideally from CI rather than your laptop (the pipeline in section 11 runs migrations in a gated `production` job; swap `prisma migrate deploy` for `supabase db push` if Supabase owns your migrations). Two commands that should never touch production: `supabase db reset --linked` (wipes the linked remote database) and `supabase db push --include-seed` (inserts your fake seed data into real tables).
+
+**Step 4: environment variables per Vercel environment.** In the Vercel project settings, each variable is assigned to Production, Preview, and/or Development:
+
+| Variable | Production | Preview | Development |
+|---|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | prod project URL | staging project URL | local URL (`http://127.0.0.1:54321`) |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | prod anon key | staging anon key | local anon key |
+| `SUPABASE_SERVICE_ROLE_KEY` | prod service key | staging service key | local service key |
+| `STRIPE_SECRET_KEY` | `sk_live_...` | `sk_test_...` | `sk_test_...` |
+| `APP_ENV` | `production` | `preview` | `development` |
+
+The service-role key bypasses Row Level Security: it must **never** get a `NEXT_PUBLIC_` prefix and must only be used in server code ([Module 2](02-security-vulnerabilities.md)). You can add values from the CLI too (`vercel env add STRIPE_SECRET_KEY production`), and `vercel env pull` writes your Development values into `.env.local`.
+
+**Step 5: fix the auth URLs before anyone tries to log in.** The classic first-deploy bug: sign-in works locally, but in production the magic link or OAuth login redirects to `http://localhost:3000`. In the Supabase dashboard's Auth URL configuration, set the **Site URL** to your production domain and add your preview URLs to the allowed **Redirect URLs** (Supabase supports wildcard patterns for Vercel preview domains; see its redirect-URL docs). Do this per project: production's list should not include localhost.
+
+**Step 6: deploy and smoke test like a stranger.** Merge to main, let the pipeline deploy, then, in a private browser window: load the home page, sign up as a brand-new user, do the core action, and check the health endpoint. Then sign up as a *second* user and try to open the first user's data by ID. If you can, stop and fix RLS before telling anyone the app exists.
+
+**Step 7: turn on the safety nets** from earlier sections: error tracking with `environment` set ([Module 6](06-observability.md)), billing alerts (section 8), backups with a tested restore ([Module 7](07-data-modeling.md)).
+
+**If you use Neon instead:** Neon's branching gives you a cheap copy of the database per branch, and its Vercel integration can create a database branch for each preview deployment, so every PR gets its own data to break. The production branch stays the production branch, with its own credentials only Production can see.
+
+### 17. Environment mix-ups: the bugs where the code was fine
+
+Some of the most expensive incidents involve no bug in the code at all, just the right code pointed at the wrong place. *(Each story is an illustrative composite of common patterns.)*
+
+**The seed script that ran against production.** A developer copies the production `DATABASE_URL` into `.env.local` "for five minutes" to debug a customer's issue. Later that day, an agent is asked to "reset the dev data so tests are clean." It runs `npm run db:reset`, which drops every table and loads 20 fake users. Into production. Restoring from the nightly backup loses the day's 300 new signups and every order placed since midnight. Then come the support emails.
+
+**The staging app that emailed real customers.** Someone imports a production database dump into staging to reproduce a bug, and staging still has the real email provider key. The nightly "your trial is ending" job runs in staging, and 4,000 real customers get a second, wrong email with a link to a staging URL. Some click it and enter their passwords into a site that isn't the real one.
+
+**The test key in production.** A deploy goes out with `sk_test_...` in Production. Checkout "works": customers see a success page, test-mode charges are created, and no money moves. It's discovered three days later when the founder asks why revenue is zero. Every one of those customers now needs to be contacted and charged properly, and some won't come back.
+
+The fixes are **guards that make the wrong combination impossible**, not reminders to be careful.
+
+**Guard 1: destructive scripts check where they're pointed** (an allowlist, so an unknown host fails safe):
+
+```js
+// scripts/lib/dbGuard.js — destructive scripts call this first
+const SAFE_HOSTS = ["localhost", "127.0.0.1", "db"]; // local machine and docker-compose
+const extra = (process.env.DEV_DB_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+
+export function assertSafeDatabase(action) {
+  const host = new URL(process.env.DATABASE_URL ?? "").hostname;
+  if (process.env.APP_ENV === "production" || ![...SAFE_HOSTS, ...extra].includes(host)) {
+    console.error(`Refusing to ${action}: APP_ENV=${process.env.APP_ENV ?? "unset"}, database host "${host}". Only known dev databases are allowed.`);
+    process.exit(1);
+  }
+}
+```
+
+```js
+// scripts/reset-db.js
+import { assertSafeDatabase } from "./lib/dbGuard.js";
+
+assertSafeDatabase("reset and reseed the database");
+// ...only now drop and reseed...
+```
+
+```text
+$ DATABASE_URL=postgres://...@db.abcdefgh.supabase.co:5432/postgres node scripts/reset-db.js
+Refusing to reset and reseed the database: APP_ENV=unset, database host "db.abcdefgh.supabase.co". Only known dev databases are allowed.
+```
+
+**Guard 2: the app refuses to boot with the wrong keys for its environment.** Extend your config validation ([Module 5](05-architecture.md)'s single config module):
+
+```ts
+// src/lib/config.ts — validate env at startup, including "is this the right environment?"
+import { z } from "zod";
+
+const Env = z
+  .object({
+    APP_ENV: z.enum(["development", "preview", "production"]),
+    DATABASE_URL: z.string().url(),
+    STRIPE_SECRET_KEY: z.string().startsWith("sk_"),
+  })
+  .superRefine((env, ctx) => {
+    const live = env.STRIPE_SECRET_KEY.startsWith("sk_live_");
+    if (env.APP_ENV === "production" && !live) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["STRIPE_SECRET_KEY"],
+        message: "Production must use a live Stripe key (sk_live_...)." });
+    }
+    if (env.APP_ENV !== "production" && live) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["STRIPE_SECRET_KEY"],
+        message: "Live Stripe key outside production. Use a test key (sk_test_...)." });
+    }
+  });
+
+export const config = Env.parse(process.env); // throws at boot with a clear message
+```
+
+A deploy with a test key in production now fails at startup with a clear message, instead of silently taking fake payments for three days.
+
+**Guard 3: make non-production environments look different.** A colored banner ("STAGING: test data, test payments") on every page outside production costs five lines and prevents a surprising number of "wait, which tab was I in?" mistakes, for you and for anyone you hand a staging link.
+
+**Guard 4: non-production can't reach real people.** Use your email provider's sandbox or test mode (or an allowlist of your own team's addresses) in staging, and test-mode keys for payments and SMS. If staging ever needs production-like data, use a scrubbed copy with fake emails and phone numbers, never a raw dump.
+
+### 18. A zero-downtime migration, worked through
+
+Section 7 gave the rules. Here they are applied to a real change: **adding `org_id` to an existing `tasks` table that already has 200,000 rows**, as part of moving to the multi-tenant model from [Module 7](07-data-modeling.md). The naive migration is one line:
+
+```sql
+-- DON'T: on a big, busy table this is how you get an outage
+ALTER TABLE tasks ADD COLUMN org_id uuid NOT NULL REFERENCES orgs(id);
+```
+
+It fails outright on a table with existing rows (they'd all be NULL), and the AI's usual "fix" (add a made-up default, or backfill and then add `NOT NULL` in the same migration) holds strong locks while scanning the whole table. While it runs, every request that touches `tasks` waits. On a large table that can be minutes of "the app is down" at peak hour, and if the deploy times out halfway, you get to find out what state you're in.
+
+The safe version takes three migrations and two deploys, and the app stays up throughout:
+
+**Migration A (expand): add a nullable column.** Adding a nullable column without a default doesn't rewrite the table, so it's instant.
+
+```sql
+-- Migration A (expand): add the column as nullable. Instant: no table rewrite.
+SET lock_timeout = '5s';   -- give up instead of queueing every other query behind us
+ALTER TABLE tasks ADD COLUMN org_id uuid;
+```
+
+`lock_timeout` matters more than it looks. `ALTER TABLE` needs a brief exclusive lock; if a long-running query is holding the table, the `ALTER` waits, and every new query lines up behind *it*. With a timeout, the migration fails fast and you retry, instead of freezing the app.
+
+**Deploy 1: new code writes `org_id`** on every new task (copied from the task's project). Old rows still have NULL; the code tolerates that for now.
+
+**Backfill in batches** (a script or a scheduled job, not one giant transaction):
+
+```sql
+-- Backfill in batches; run repeatedly until it reports UPDATE 0
+UPDATE tasks t
+SET org_id = p.org_id
+FROM projects p
+WHERE p.id = t.project_id
+  AND t.id IN (SELECT id FROM tasks WHERE org_id IS NULL LIMIT 5000);
+```
+
+Each batch locks only 5,000 rows briefly. For our 200,000 rows that's 40 batches, then one that reports `UPDATE 0`.
+
+**Migration B (enforce): make it required without a long lock.**
+
+```sql
+-- Migration B (enforce), after the backfill reports UPDATE 0:
+SET lock_timeout = '5s';
+ALTER TABLE tasks ADD CONSTRAINT tasks_org_id_fkey
+  FOREIGN KEY (org_id) REFERENCES orgs(id) NOT VALID;          -- instant; checks new writes only
+ALTER TABLE tasks VALIDATE CONSTRAINT tasks_org_id_fkey;       -- checks old rows without blocking writes
+ALTER TABLE tasks ADD CONSTRAINT tasks_org_id_not_null
+  CHECK (org_id IS NOT NULL) NOT VALID;                        -- instant; new writes must have org_id
+ALTER TABLE tasks VALIDATE CONSTRAINT tasks_org_id_not_null;   -- scans old rows without blocking writes
+ALTER TABLE tasks ALTER COLUMN org_id SET NOT NULL;            -- uses the validated CHECK: no second scan
+ALTER TABLE tasks DROP CONSTRAINT tasks_org_id_not_null;       -- redundant now
+```
+
+The trick (documented in [Postgres's `ALTER TABLE` reference](https://www.postgresql.org/docs/current/sql-altertable.html)): a `NOT VALID` constraint is added instantly and applies to new writes; `VALIDATE` checks existing rows with a lighter lock that doesn't block normal reads and writes; and when `SET NOT NULL` finds a validated `CHECK (org_id IS NOT NULL)`, Postgres skips its own full-table scan. With debug logging on, Postgres tells you so: *"existing constraints on column "tasks.org_id" are sufficient to prove that it does not contain nulls."*
+
+And if the backfill missed rows, `VALIDATE` fails with `check constraint "tasks_org_id_not_null" ... is violated by some row` and changes nothing. That's the safety net working: run the backfill again until it reports `UPDATE 0`, then retry.
+
+**Migration C: index it without blocking writes.**
+
+```sql
+-- Migration C: index without blocking writes (cannot run inside a transaction block)
+CREATE INDEX CONCURRENTLY idx_tasks_org ON tasks (org_id);
+```
+
+`CONCURRENTLY` builds the index while the table stays writable. It can't run inside a transaction, and many migration tools wrap each migration in one, so check your tool's docs for how to mark a migration as non-transactional.
+
+**Deploy 2: new code relies on `org_id`** (filters by it, requires it).
+
+The timeline, so you can see that every moment is safe:
+
+| Moment | Database | Running code | Safe? |
+|---|---|---|---|
+| Before | no `org_id` | v1 (ignores it) | yes |
+| After migration A | nullable `org_id` | v1 | yes: v1 doesn't know the column exists |
+| During deploy 1 | nullable `org_id` | v1 and v2 side by side | yes: v1 writes NULL, v2 writes values, both allowed |
+| During backfill | filling in | v2 | yes: small batches, short locks |
+| After migration B | `org_id NOT NULL` | v2 (always writes it) | yes: v1 is fully gone, so nobody writes NULL |
+| After deploy 2 | indexed, required | v3 (uses it) | yes |
+
+The one thing this plan needs is patience: migration B must wait until no v1 instance is still running. That's why it's a *separate* migration, not the end of migration A.
+
+### 19. Runaway costs, with the math
+
+The Vibe Fail at the top of this module is a $4,000 weekend. Here's how fast that number arrives, so the guardrails stop feeling optional. *(Illustrative: the prices are hypothetical but in the range of popular hosted models; plug in your provider's current pricing.)*
+
+Assume a model priced at **$2.50 per million input tokens** and **$10 per million output tokens**, and a "summarize this PDF" endpoint that sends about 8,000 tokens in and gets 800 back:
+
+| | Calculation | Cost |
+|---|---|---|
+| One request | 8,000 × $2.50/M + 800 × $10/M = $0.020 + $0.008 | **$0.028** |
+| An abuser's script: 1,000 requests/hour | 1,000 × $0.028 | $28/hour |
+| Plus a retry loop: each timeout retried, ~3 calls per request | 3,000 × $0.028 | **$84/hour** |
+| Friday 6 p.m. to Sunday 6 p.m. (48 hours) | $84 × 48 | **$4,032** |
+
+Nobody did anything clever. Three cents a call is invisible in testing, and $84 an hour is invisible if nobody is watching. Now the same weekend with the guardrails from this module:
+
+| Guardrail | Effect on that weekend |
+|---|---|
+| Authentication on the endpoint (section 8) | The anonymous script gets `401`s. Cost: ~$0. |
+| Per-user rate limit, e.g. 20 summaries/hour (section 9) | Even a real account that abuses it is capped at ~$0.56/hour. |
+| Bounded retries (max 3 attempts, only for retryable errors, with backoff) | Removes the 3× multiplier during provider trouble. |
+| Input cap, e.g. 4,000 tokens per request | Halves the input cost of every call. |
+| Hard monthly spending cap of $50 on the production key | **The absolute worst case is $50**, whatever else goes wrong. |
+| Billing alert at $10 | You hear about it Friday night, not Monday morning. |
+
+The spending cap is the one that turns "unbounded" into "bounded." Every other guardrail reduces the odds; the cap limits the damage when the odds lose. Spend 15 minutes setting the cap and the alerts on every usage-billed service today (section 13 has the full checklist).
 
 ---
 
@@ -636,4 +862,4 @@ Use Prompt Template 6, then edit it until you'd trust it at 3 a.m. Save it somew
 
 ---
 
-**Next up:** [Module 9: Tech Debt, Refactoring & Knowing When to Stop Vibing](09-tech-debt.md)
+**Next up:** [Module 9: Tech Debt, Refactoring & Knowing When to Stop Vibing](09-tech-debt.md) · [Back to course outline](../course-outline.md)
